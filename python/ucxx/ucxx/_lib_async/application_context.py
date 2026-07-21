@@ -204,6 +204,18 @@ class ApplicationContext:
     def worker_address(self):
         return self.worker.address
 
+    def register_am_receiver_callback(self, owner, identifier, cb_func):
+        """Register a worker-scoped active message receiver callback.
+
+        Fires for every incoming active message sent with a matching
+        `receiver_callback_info=(owner, identifier)` (see
+        `Endpoint.am_send`), and auto-re-arms. `cb_func(request, ep_handle)`
+        executes on the UCXX progress thread and must not block — hand off
+        to an event loop for real work; the message payload is available
+        via `request.recv_buffer`.
+        """
+        self.worker.register_am_receiver_callback(owner, identifier, cb_func)
+
     def clear_progress_tasks(self) -> None:
         global ProgressTasks
         ProgressTasks.clear()

@@ -242,6 +242,10 @@ def get_worker_address():
     return _get_ctx().worker_address
 
 
+def register_am_receiver_callback(owner, identifier, cb_func):
+    return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
+
+
 def get_ucx_address_from_buffer(buffer):
     return ucx_api.UCXAddress.create_from_buffer(buffer)
 
@@ -251,6 +255,9 @@ async def recv(buffer, tag):
 
 
 # Setting the __doc__
+register_am_receiver_callback.__doc__ = (
+    ApplicationContext.register_am_receiver_callback.__doc__
+)
 create_listener.__doc__ = ApplicationContext.create_listener.__doc__
 create_endpoint.__doc__ = ApplicationContext.create_endpoint.__doc__
 continuous_ucx_progress.__doc__ = ApplicationContext.continuous_ucx_progress.__doc__
@@ -276,4 +283,5 @@ __all__ = [
     "get_worker_address",
     "get_ucx_address_from_buffer",
     "recv",
+    "register_am_receiver_callback",
 ]
