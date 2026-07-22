@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include <ucxx/log.h>
@@ -23,6 +24,7 @@ enum class BufferType {
   Host = 0,
   RMM,
   CCCL,
+  External,
   Invalid,
 };
 
@@ -189,6 +191,58 @@ class HostBuffer : public Buffer {
    * @endcode
    *
    * @throws std::runtime_error if object has been released.
+   *
+   * @return the void pointer to the buffer.
+   */
+  [[nodiscard]] void* data() override;
+};
+
+/**
+ * @brief A buffer wrapping externally-owned memory.
+ *
+ * Wraps memory owned by the application (e.g., a pinned staging pool managed
+ * from Python) so a registered AM allocator can direct receives into it. The
+ * buffer never owns the allocation: on destruction it only invokes the
+ * caller-provided releaser, which is responsible for returning the memory to
+ * its owner. The releaser must be safe to call from any thread, including the
+ * UCXX progress thread.
+ */
+class ExternalBuffer : public Buffer {
+ private:
+  void* _buffer;                    ///< Pointer to the externally-owned buffer
+  std::function<void()> _releaser;  ///< Invoked on destruction; never frees here
+  void* _userData;                  ///< Opaque owner handle (e.g., a PyObject*)
+
+ public:
+  ExternalBuffer()                                 = delete;
+  ExternalBuffer(const ExternalBuffer&)            = delete;
+  ExternalBuffer& operator=(ExternalBuffer const&) = delete;
+  ExternalBuffer(ExternalBuffer&& o)               = delete;
+  ExternalBuffer& operator=(ExternalBuffer&& o)    = delete;
+
+  /**
+   * @brief Constructor of concrete type `ExternalBuffer`.
+   *
+   * @param[in] buffer   pointer to the externally-owned memory.
+   * @param[in] size     the usable size of that memory in bytes.
+   * @param[in] releaser callback invoked exactly once on destruction.
+   */
+  ExternalBuffer(void* buffer,
+                 const size_t size,
+                 std::function<void()> releaser,
+                 void* userData = nullptr);
+
+  ~ExternalBuffer();
+
+  /**
+   * @brief Get the opaque owner handle supplied at construction.
+   *
+   * @return the user data pointer (may be null).
+   */
+  [[nodiscard]] void* getUserData() const noexcept;
+
+  /**
+   * @brief Get a pointer to the externally-owned buffer.
    *
    * @return the void pointer to the buffer.
    */

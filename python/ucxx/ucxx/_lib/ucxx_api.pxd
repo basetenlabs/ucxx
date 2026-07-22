@@ -151,6 +151,7 @@ cdef extern from "<ucxx/buffer.h>" namespace "ucxx" nogil:
         Host
         RMM
         CCCL
+        External
         Invalid
 
     cdef cppclass Buffer:
@@ -220,6 +221,12 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
     # See https://github.com/cython/cython/issues/2041 and
     # https://github.com/cython/cython/issues/3193
     ctypedef shared_ptr[Buffer] (*AmAllocatorType)(size_t)
+
+    # The same C++ `ucxx::AmAllocatorType` (a std::function), left opaque so a
+    # capturing allocator built by the verbatim helper in libucxx.pyx can be
+    # passed where the raw-pointer typedef above cannot carry state.
+    cdef cppclass AmAllocatorFunction "ucxx::AmAllocatorType":
+        pass
 
     ctypedef cpp_unordered_map[string, string] ConfigMap
 
@@ -310,6 +317,9 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         void registerAmAllocator(
             ucs_memory_type_t memoryType, AmAllocatorType allocator
         )
+        void registerAmAllocator(
+            ucs_memory_type_t memoryType, AmAllocatorFunction allocator
+        ) except +raise_py_error
         void registerAmReceiverCallback(
             AmReceiverCallbackInfo info, AmReceiverCallbackType callback
         ) except +raise_py_error

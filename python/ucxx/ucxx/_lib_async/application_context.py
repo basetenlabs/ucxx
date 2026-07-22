@@ -216,6 +216,19 @@ class ApplicationContext:
         """
         self.worker.register_am_receiver_callback(owner, identifier, cb_func)
 
+    def register_am_host_allocator(self, cb_func):
+        """Register an allocator for host-memory active message receives.
+
+        Every eager host-memory active message received on the worker is
+        delivered into a buffer obtained from `cb_func(size)` instead of an
+        internal allocation. `cb_func` must return an object exposing at
+        least `size` writable contiguous bytes via the buffer protocol, or
+        `None` to fall back to an internal allocation for that message; the
+        returned object is handed back as-is by `request.recv_buffer`.
+        Executes on the UCXX progress thread and must not block.
+        """
+        self.worker.register_am_host_allocator(cb_func)
+
     def clear_progress_tasks(self) -> None:
         global ProgressTasks
         ProgressTasks.clear()

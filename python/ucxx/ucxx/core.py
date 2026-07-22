@@ -246,6 +246,10 @@ def register_am_receiver_callback(owner, identifier, cb_func):
     return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
 
 
+def register_am_host_allocator(cb_func):
+    return _get_ctx().register_am_host_allocator(cb_func)
+
+
 def get_ucx_address_from_buffer(buffer):
     return ucx_api.UCXAddress.create_from_buffer(buffer)
 
@@ -257,6 +261,9 @@ async def recv(buffer, tag):
 # Setting the __doc__
 register_am_receiver_callback.__doc__ = (
     ApplicationContext.register_am_receiver_callback.__doc__
+)
+register_am_host_allocator.__doc__ = (
+    ApplicationContext.register_am_host_allocator.__doc__
 )
 create_listener.__doc__ = ApplicationContext.create_listener.__doc__
 create_endpoint.__doc__ = ApplicationContext.create_endpoint.__doc__
@@ -284,4 +291,5 @@ __all__ = [
     "get_ucx_address_from_buffer",
     "recv",
     "register_am_receiver_callback",
+    "register_am_host_allocator",
 ]
