@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES.
  * SPDX-License-Identifier: BSD-3-Clause
  */
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -53,6 +54,41 @@ struct EndpointErrorCallbackContext {
 
   explicit EndpointErrorCallbackContext(std::shared_ptr<Endpoint> ep) : endpoint(std::move(ep)) {}
 };
+
+/**
+ * Select the UCP error handling mode for an error-handling-enabled endpoint.
+ *
+ * Defaults to `UCP_ERR_HANDLING_MODE_PEER` (a single lane/NIC failure fails the whole
+ * endpoint). When `UCXX_ERROR_HANDLING_MODE=failover` is set in the environment,
+ * worker-address endpoints instead use `UCP_ERR_HANDLING_MODE_FAILOVER`: on a lane
+ * failure UCP runs `ucp_ep_failover_reconfig()`, reconfiguring the endpoint onto the
+ * surviving NIC lanes and keeping it alive, so subsequent operations (e.g. `tagSend`)
+ * transparently reroute around the dead NIC.
+ *
+ * The failover mode only applies to worker-address endpoints: UCX rejects it for
+ * sockaddr / connection-request endpoints because those carry a connection-manager (CM)
+ * lane, which failover reconfiguration does not support (see `ucp_ep_set_lanes_failed`
+ * in UCX, guarded on `cm_lane == UCP_NULL_LANE`). Requesting failover for such an
+ * endpoint silently falls back to peer mode here so behavior stays well-defined.
+ */
+static ucp_err_handling_mode_t endpointErrorHandlingMode(uint64_t fieldMask)
+{
+  static const bool failoverRequested = []() {
+    const char* env       = std::getenv("UCXX_ERROR_HANDLING_MODE");
+    const bool  requested = env != nullptr && std::string(env) == "failover";
+    if (requested)
+      ucxx_info("UCXX_ERROR_HANDLING_MODE=failover: worker-address endpoints will use "
+                "UCP_ERR_HANDLING_MODE_FAILOVER (NIC/lane failover)");
+    return requested;
+  }();
+
+  const bool isWorkerAddress = (fieldMask & UCP_EP_PARAM_FIELD_REMOTE_ADDRESS) &&
+                               !(fieldMask & (UCP_EP_PARAM_FIELD_SOCK_ADDR |
+                                              UCP_EP_PARAM_FIELD_CONN_REQUEST));
+
+  if (failoverRequested && isWorkerAddress) return UCP_ERR_HANDLING_MODE_FAILOVER;
+  return UCP_ERR_HANDLING_MODE_PEER;
+}
 
 static std::shared_ptr<Worker> getWorker(std::shared_ptr<Component> workerOrListener)
 {
@@ -131,7 +167,7 @@ void Endpoint::create(ucp_ep_params_t* params)
   auto worker = ::ucxx::getWorker(_parent);
 
   if (_endpointErrorHandling) {
-    params->err_mode       = UCP_ERR_HANDLING_MODE_PEER;
+    params->err_mode       = endpointErrorHandlingMode(params->field_mask);
     params->err_handler.cb = endpointErrorCallback;
     params->err_handler.arg =
       new EndpointErrorCallbackContext(std::dynamic_pointer_cast<Endpoint>(shared_from_this()));

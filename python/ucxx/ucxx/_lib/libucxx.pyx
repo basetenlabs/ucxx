@@ -37,6 +37,33 @@ cdef extern from "cuda_runtime.h" nogil:
     int cudaMemcpy(void* dst, const void* src, size_t count,
                    cudaMemcpyKind kind)
 
+cdef extern from *:
+    """
+    #include <ucxx/api.h>
+
+    /* Bridge a Cython trampoline (raw C function pointer + opaque argument)
+     * into the `std::function`-typed `ucxx::AmReceiverCallbackType`. Cython
+     * cannot express `std::function<void(std::shared_ptr<Request>, ucp_ep_h)>`
+     * directly (see the AmAllocatorType workaround in ucxx_api.pxd), so the
+     * lambda capture happens in this verbatim C++ helper instead.
+     */
+    using _ucxx_py_am_receiver_cb_t =
+        void (*)(std::shared_ptr<ucxx::Request>, ucp_ep_h, void*);
+
+    static ucxx::AmReceiverCallbackType _ucxx_make_am_receiver_callback(
+        _ucxx_py_am_receiver_cb_t trampoline, void* arg)
+    {
+        return [trampoline, arg](std::shared_ptr<ucxx::Request> req,
+                                 ucp_ep_h ep) { trampoline(req, ep, arg); };
+    }
+    """
+    ctypedef void (*_ucxx_py_am_receiver_cb_t)(
+        shared_ptr[Request], ucp_ep_h, void*
+    )
+    AmReceiverCallbackType _ucxx_make_am_receiver_callback(
+        _ucxx_py_am_receiver_cb_t trampoline, void* arg
+    )
+
 import numpy as np
 
 from rmm.pylibrmm.device_buffer cimport DeviceBuffer
@@ -684,6 +711,7 @@ cdef class UCXWorker():
         cdef AmAllocatorType cccl_am_allocator
 
         self._context_feature_flags = <uint64_t>(context.feature_flags)
+        self._am_receiver_callbacks = {}
 
         with nogil:
             self._worker = createPythonWorker(
@@ -926,6 +954,79 @@ cdef class UCXWorker():
                 deref(func_generic_callback), <void*>self._progress_thread_start_cb_data
             )
         del func_generic_callback
+
+    def register_am_receiver_callback(
+            self, str owner, uint64_t identifier, cb_func
+    ) -> None:
+        """Register a worker-scoped active message receiver callback.
+
+        The callback fires for every incoming active message whose sender
+        tagged it with the same `(owner, identifier)` pair (see the
+        `receiver_callback_info` argument of `UCXEndpoint.am_send`), and
+        auto-re-arms — unlike `am_recv()`, no receive needs to be posted per
+        message. Messages routed to a receiver callback are consumed by it
+        exclusively; they will never match an `am_recv()`.
+
+        The registration is worker-scoped and lives for the worker's
+        lifetime; there is no unregister. The owner name "ucxx" is reserved.
+
+        Parameters
+        ----------
+        owner: str
+            Name identifying the callback's owner, e.g. the application name.
+        identifier: int
+            Callback identifier, unique within `owner`.
+        cb_func: callable
+            Called as `cb_func(request: UCXRequest, ep_handle: int)` for each
+            delivered message, where `request` is the completed receive
+            request (payload available via `request.recv_buffer`) and
+            `ep_handle` is the `ucp_ep_h` of the sender's reply endpoint.
+
+            **Executes on the UCXX progress thread** with the GIL acquired:
+            it must be quick and non-blocking (e.g. hand off to an event
+            loop); blocking stalls all UCX progress for the worker.
+        """
+        if not self._context_feature_flags & Feature.AM.value:
+            raise ValueError("UCXContext must be created with `Feature.AM`")
+
+        key = (owner, identifier)
+        if key in self._am_receiver_callbacks:
+            raise ValueError(
+                f"AM receiver callback already registered for {key}"
+            )
+
+        # Keeps the trampoline's `void*` argument alive: the C++ side holds a
+        # borrowed pointer to this dict for the worker's lifetime.
+        cdef dict cb_data = {
+            "cb_func": cb_func,
+            "enable_python_future": self._enable_python_future,
+        }
+        self._am_receiver_callbacks[key] = cb_data
+
+        cdef bytes owner_bytes = owner.encode("utf-8")
+        cdef const char* owner_c_str = owner_bytes
+        cdef uint64_t cb_id = identifier
+        cdef AmReceiverCallbackType wrapped_callback = (
+            _ucxx_make_am_receiver_callback(
+                <_ucxx_py_am_receiver_cb_t>&_am_receiver_callback,
+                <void*>cb_data,
+            )
+        )
+        # Heap-construct: AmReceiverCallbackInfo has no default constructor,
+        # which Cython requires for stack temporaries of C++ classes.
+        cdef AmReceiverCallbackInfo* cb_info = (
+            new AmReceiverCallbackInfo(owner_c_str, cb_id)
+        )
+        try:
+            with nogil:
+                self._worker.get().registerAmReceiverCallback(
+                    deref(cb_info), wrapped_callback
+                )
+        except Exception:
+            del self._am_receiver_callbacks[key]
+            raise
+        finally:
+            del cb_info
 
     def stop_request_notifier_thread(self) -> None:
         with nogil:
@@ -1377,6 +1478,27 @@ cdef class UCXBufferRequests:
         return self.py_buffers
 
 
+cdef void _am_receiver_callback(
+    shared_ptr[Request] req, ucp_ep_h ep, void* args
+) with gil:
+    """Trampoline for AM receiver callbacks registered from Python.
+
+    Runs on the UCXX progress thread with the GIL acquired; the Python
+    callback must not block. `args` is a borrowed reference to the
+    per-registration data dict kept alive by
+    `UCXWorker._am_receiver_callbacks`.
+    """
+    cdef dict cb_data = <dict>args
+    cdef UCXRequest request = UCXRequest(
+        <uintptr_t><void*>&req, cb_data["enable_python_future"]
+    )
+
+    try:
+        cb_data["cb_func"](request, int(<uintptr_t>ep))
+    except Exception as e:
+        logger.error(f"{type(e)} when calling AM receiver callback: {e}")
+
+
 cdef void _endpoint_close_callback(ucs_status_t status, shared_ptr[void] args) with gil:
     """Callback function called when UCXEndpoint closes or errors"""
     cdef shared_ptr[uintptr_t] cb_data_ptr = static_pointer_cast[uintptr_t, void](args)
@@ -1560,23 +1682,60 @@ cdef class UCXEndpoint():
 
         return ep_matched
 
-    def am_send(self, Array arr) -> UCXRequest:
+    def am_send(self, Array arr, tuple receiver_callback_info=None) -> UCXRequest:
+        """Send `arr` to the connected peer via an active message.
+
+        Parameters
+        ----------
+        arr: Array
+            The buffer to send.
+        receiver_callback_info: tuple(str, int), optional
+            `(owner, identifier)` of a receiver callback registered on the
+            peer's worker via `UCXWorker.register_am_receiver_callback`. When
+            given, the message is delivered to that callback (and only that
+            callback — the peer's `am_recv()` will not match it). When
+            `None`, the message matches the peer's `am_recv()` as before.
+        """
         cdef void* buf = <void*>arr.ptr
         cdef size_t nbytes = arr.nbytes
         cdef bint cuda_array = arr.cuda
         cdef shared_ptr[Request] req
+        cdef bytes owner_bytes
+        cdef const char* owner_c_str
+        cdef uint64_t cb_id
+        cdef AmReceiverCallbackInfo* cb_info
 
         if not self._context_feature_flags & Feature.AM.value:
             raise ValueError("UCXContext must be created with `Feature.AM`")
 
-        with nogil:
-            req = self._endpoint.get().amSend(
-                buf,
-                nbytes,
-                UCS_MEMORY_TYPE_CUDA if cuda_array else UCS_MEMORY_TYPE_HOST,
-                nullopt,
-                self._enable_python_future
-            )
+        if receiver_callback_info is not None:
+            owner, identifier = receiver_callback_info
+            owner_bytes = owner.encode("utf-8")
+            owner_c_str = owner_bytes
+            cb_id = identifier
+            # Heap-construct: no default constructor (see
+            # register_am_receiver_callback).
+            cb_info = new AmReceiverCallbackInfo(owner_c_str, cb_id)
+            try:
+                with nogil:
+                    req = self._endpoint.get().amSend(
+                        buf,
+                        nbytes,
+                        UCS_MEMORY_TYPE_CUDA if cuda_array else UCS_MEMORY_TYPE_HOST,
+                        deref(cb_info),
+                        self._enable_python_future
+                    )
+            finally:
+                del cb_info
+        else:
+            with nogil:
+                req = self._endpoint.get().amSend(
+                    buf,
+                    nbytes,
+                    UCS_MEMORY_TYPE_CUDA if cuda_array else UCS_MEMORY_TYPE_HOST,
+                    nullopt,
+                    self._enable_python_future
+                )
 
         return UCXRequest(<uintptr_t><void*>&req, self._enable_python_future)
 

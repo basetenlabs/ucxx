@@ -203,6 +203,15 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         ucp_tag_message_h getHandle() except +
 
     cdef cppclass AmReceiverCallbackInfo:
+        # The C++ constructor takes (AmReceiverCallbackOwnerType, AmReceiverCallbackIdType);
+        # `const char*` converts implicitly to the owner type (which validates length and
+        # may throw), and the id type is a uint64_t typedef.
+        AmReceiverCallbackInfo(const char* owner, uint64_t id) except +
+
+    # `std::function<void(std::shared_ptr<Request>, ucp_ep_h)>`. Left opaque: Cython
+    # cannot express the template arguments (same limitation as AmAllocatorType below);
+    # instances are produced by the verbatim C++ helper in libucxx.pyx.
+    cdef cppclass AmReceiverCallbackType:
         pass
 
     # Using function[Buffer] here doesn't seem possible due to Cython bugs/limitations.
@@ -301,6 +310,9 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         void registerAmAllocator(
             ucs_memory_type_t memoryType, AmAllocatorType allocator
         )
+        void registerAmReceiverCallback(
+            AmReceiverCallbackInfo info, AmReceiverCallbackType callback
+        ) except +raise_py_error
         BufferType getCudaBufferType() const
 
     cdef cppclass Endpoint(Component):
@@ -315,8 +327,17 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
             ucs_memory_type_t memory_type,
             # Using `nullopt_t` is a workaround for Cython error
             # "Cannot assign type 'nullopt_t' to 'optional[AmReceiverCallbackInfo]'"
-            # Must change when AM receiver callbacks are implemented in Python.
             nullopt_t receiver_callback_info,
+            bint enable_python_future
+        ) except +raise_py_error
+        # Same C++ method as above: both `nullopt_t` and a bare
+        # `AmReceiverCallbackInfo` convert implicitly to the
+        # `optional[AmReceiverCallbackInfo]` parameter that Cython cannot spell.
+        shared_ptr[Request] amSend(
+            const void* const buffer,
+            size_t length,
+            ucs_memory_type_t memory_type,
+            AmReceiverCallbackInfo receiver_callback_info,
             bint enable_python_future
         ) except +raise_py_error
         shared_ptr[Request] amRecv(
