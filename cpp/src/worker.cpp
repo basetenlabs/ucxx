@@ -569,8 +569,35 @@ size_t Worker::cancelInflightRequests(uint64_t period, uint64_t maxAttempts)
   }
 
   if (inflightRequestsToCancel->getCancelingSize() > 0) {
-    std::lock_guard<std::mutex> lock(_inflightRequestsMutex);
-    _inflightRequestsToCancel->merge(inflightRequestsToCancel->release());
+    /* Requests still in progress after the cancelation attempts are parked
+     * instead of being merged back into the to-cancel pool. Merging back
+     * meant every `progress()` iteration re-ran the cancelation machinery
+     * over the same stuck requests: a full status scan locking each
+     * request, extra progress calls, and releasing/rebuilding the
+     * containers (`ucp_request_cancel()` cannot cancel send requests, so
+     * none of that work could ever retire them). Under a failure storm
+     * (many transfer timeouts, no completions until endpoints are torn
+     * down) that per-iteration work grows with the stranded population and
+     * starves the progress loop - including the generic pre/post callbacks
+     * used by endpoint creation and close, whose waiters then spin logging
+     * "Could not cancel ... the callback has not returned".
+     *
+     * Parked requests need no periodic attention: a completing request
+     * removes itself from the parked container via `Request::setStatus()`
+     * -> `removeInflightRequest()`. The one-time prune below covers
+     * requests that completed while held by this function's local
+     * container, where the completion path could not find them. */
+    {
+      std::lock_guard<std::mutex> lock(_inflightRequestsMutex);
+      _cancelingInflightRequests->merge(inflightRequestsToCancel->release());
+    }
+    /* One-time prune of the batch just parked, after releasing the worker
+     * mutex (the prune takes request mutexes; a completing request takes
+     * its own mutex before the worker mutex, so nesting them here would
+     * invert the lock order). This is the only place the parked container
+     * is scanned: it runs once per parked batch, never per progress
+     * iteration. */
+    std::ignore = _cancelingInflightRequests->getCancelingSize();
   }
 
   return canceled;
@@ -601,11 +628,22 @@ std::shared_ptr<Request> Worker::registerInflightRequest(std::shared_ptr<Request
   return request;
 }
 
+size_t Worker::cancelingRequestsSize()
+{
+  std::lock_guard<std::mutex> lock(_inflightRequestsMutex);
+  return _cancelingInflightRequests->cancelingSize();
+}
+
 void Worker::removeInflightRequest(std::shared_ptr<Request> request)
 {
   {
     std::lock_guard<std::mutex> lock(_inflightRequestsMutex);
     _inflightRequests->remove(request);
+    /* A completing request unhooks itself from the cancelation containers
+     * too: this is what keeps canceled-but-stuck requests from requiring
+     * any periodic sweep - cleanup is driven by the completion itself. */
+    _inflightRequestsToCancel->remove(request);
+    _cancelingInflightRequests->remove(request);
   }
 }
 

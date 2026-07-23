@@ -60,6 +60,10 @@ class Worker : public Component {
     _inflightRequestsToCancelMutex{};  ///< Mutex to access the inflight requests to cancel pool
   std::unique_ptr<InflightRequests> _inflightRequestsToCancel{
     std::make_unique<InflightRequests>()};  ///< The inflight requests scheduled to be canceled
+  std::unique_ptr<InflightRequests> _cancelingInflightRequests{
+    std::make_unique<InflightRequests>()};  ///< Requests whose cancelation was attempted but
+                                            ///< remain in progress; pruned as they complete,
+                                            ///< never re-canceled
   WorkerProgressThread _progressThread{};   ///< The progress thread object
   std::thread::id _progressThreadId{};      ///< The progress thread ID
   std::function<void(void*)> _progressThreadStartCallback{
@@ -709,6 +713,17 @@ class Worker : public Component {
    * @param[in] request shared pointer to the request
    */
   void removeInflightRequest(std::shared_ptr<Request> request);
+
+  /**
+   * @brief Get the number of parked canceled-but-incomplete requests.
+   *
+   * Requests whose cancelation was attempted but that remain in progress
+   * are parked until their completion removes them; this returns the
+   * current parked count without scanning request statuses.
+   *
+   * @returns the number of parked requests.
+   */
+  [[nodiscard]] size_t cancelingRequestsSize();
 
   /**
    * @brief Check for uncaught tag messages.
