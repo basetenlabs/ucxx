@@ -56,6 +56,51 @@ cdef extern from *:
         return [trampoline, arg](std::shared_ptr<ucxx::Request> req,
                                  ucp_ep_h ep) { trampoline(req, ep, arg); };
     }
+
+    /* Same bridge for the `std::function`-typed `ucxx::AmAllocatorType`, so a
+     * Python callable can serve eager AM receive allocations. */
+    using _ucxx_py_am_alloc_t =
+        std::shared_ptr<ucxx::Buffer> (*)(size_t, void*);
+
+    static ucxx::AmAllocatorType _ucxx_make_py_am_allocator(
+        _ucxx_py_am_alloc_t trampoline, void* arg)
+    {
+        return [trampoline, arg](size_t size) { return trampoline(size, arg); };
+    }
+
+    /* Wrap application-owned memory in an `ExternalBuffer`. Holds a strong
+     * reference to `owner` (the Python object exposing the memory) and drops
+     * it from the buffer's releaser, which may run on the progress thread
+     * without the GIL held. */
+    static std::shared_ptr<ucxx::Buffer> _ucxx_make_external_buffer(
+        void* ptr, size_t size, PyObject* owner)
+    {
+        Py_INCREF(owner);
+        return std::make_shared<ucxx::ExternalBuffer>(
+            ptr,
+            size,
+            [owner]() {
+                PyGILState_STATE state = PyGILState_Ensure();
+                Py_DECREF(owner);
+                PyGILState_Release(state);
+            },
+            static_cast<void*>(owner));
+    }
+
+    static std::shared_ptr<ucxx::Buffer> _ucxx_make_default_host_buffer(
+        size_t size)
+    {
+        return std::make_shared<ucxx::HostBuffer>(size);
+    }
+
+    /* Borrowed pointer to the Python owner of an `ExternalBuffer`, or null
+     * for any other buffer type. */
+    static PyObject* _ucxx_external_buffer_owner(ucxx::Buffer* buffer)
+    {
+        auto* ext = dynamic_cast<ucxx::ExternalBuffer*>(buffer);
+        return ext == nullptr ? nullptr
+                              : static_cast<PyObject*>(ext->getUserData());
+    }
     """
     ctypedef void (*_ucxx_py_am_receiver_cb_t)(
         shared_ptr[Request], ucp_ep_h, void*
@@ -63,6 +108,15 @@ cdef extern from *:
     AmReceiverCallbackType _ucxx_make_am_receiver_callback(
         _ucxx_py_am_receiver_cb_t trampoline, void* arg
     )
+    ctypedef shared_ptr[Buffer] (*_ucxx_py_am_alloc_t)(size_t, void*)
+    AmAllocatorFunction _ucxx_make_py_am_allocator(
+        _ucxx_py_am_alloc_t trampoline, void* arg
+    )
+    shared_ptr[Buffer] _ucxx_make_external_buffer(
+        void* ptr, size_t size, PyObject* owner
+    )
+    shared_ptr[Buffer] _ucxx_make_default_host_buffer(size_t size)
+    PyObject* _ucxx_external_buffer_owner(Buffer* buffer)
 
 import numpy as np
 
@@ -1028,6 +1082,52 @@ cdef class UCXWorker():
         finally:
             del cb_info
 
+    def register_am_host_allocator(self, cb_func) -> None:
+        """Register a Python allocator for host-memory active message receives.
+
+        Once registered, every eager host-memory active message received on
+        this worker is delivered into a buffer obtained from `cb_func` instead
+        of an internally `malloc`ed one, eliminating one host copy when the
+        application would otherwise immediately copy the payload into its own
+        staging memory.
+
+        Registering again replaces the previous allocator. There is no
+        unregister; the registration lives for the worker's lifetime.
+
+        Parameters
+        ----------
+        cb_func: callable
+            Called as `cb_func(size: int)` for each allocation. It must
+            return either an object exposing at least `size` writable
+            contiguous bytes via the buffer protocol (e.g. a NumPy array) or
+            `None` to decline, in which case UCXX falls back to an internal
+            host allocation for that message. The returned object is kept
+            alive until UCXX drops the receive buffer, and is handed back
+            as-is by `UCXRequest.recv_buffer`.
+
+            **Executes on the UCXX progress thread** with the GIL acquired:
+            it must be quick and non-blocking; blocking stalls all UCX
+            progress for the worker.
+        """
+        if not self._context_feature_flags & Feature.AM.value:
+            raise ValueError("UCXContext must be created with `Feature.AM`")
+
+        # Keeps the trampoline's `void*` argument alive: the C++ side holds a
+        # borrowed pointer to this dict for the worker's lifetime.
+        cdef dict cb_data = {"cb_func": cb_func}
+        self._am_host_allocator_data = cb_data
+
+        cdef AmAllocatorFunction wrapped_allocator = (
+            _ucxx_make_py_am_allocator(
+                <_ucxx_py_am_alloc_t>&_am_host_allocator,
+                <void*>cb_data,
+            )
+        )
+        with nogil:
+            self._worker.get().registerAmAllocator(
+                UCS_MEMORY_TYPE_HOST, wrapped_allocator
+            )
+
     def stop_request_notifier_thread(self) -> None:
         with nogil:
             self._worker.get().stopRequestNotifierThread()
@@ -1184,9 +1284,10 @@ cdef class UCXRequest():
         return <object>future_ptr
 
     @property
-    def recv_buffer(self) -> None|np.ndarray|DeviceBuffer:
+    def recv_buffer(self) -> object:
         cdef shared_ptr[Buffer] buf
         cdef BufferType bufType
+        cdef PyObject* owner_ptr
 
         with nogil:
             buf = self._request.get().getRecvBuffer()
@@ -1201,6 +1302,16 @@ cdef class UCXRequest():
             return _get_cccl_buffer(buf)
         elif bufType == BufferType.Host:
             return _get_host_buffer(<uintptr_t><void*>buf.get())
+        elif bufType == BufferType.External:
+            # Buffer allocated by an application allocator (see
+            # `UCXWorker.register_am_host_allocator`): hand the application's
+            # own object back. The borrowed pointer is kept alive by the
+            # `ExternalBuffer`'s strong reference until the request drops it;
+            # the cast below takes a new reference for the caller.
+            owner_ptr = _ucxx_external_buffer_owner(buf.get())
+            if owner_ptr == NULL:
+                return None
+            return <object>owner_ptr
 
     def is_completed(self) -> bool:
         warnings.warn(
@@ -1293,6 +1404,16 @@ cdef class UCXBufferRequest:
             return _get_cccl_buffer(buf)
         elif bufType == BufferType.Host:
             return _get_host_buffer(<uintptr_t><void*>buf.get())
+        elif bufType == BufferType.External:
+            # Buffer allocated by an application allocator (see
+            # `UCXWorker.register_am_host_allocator`): hand the application's
+            # own object back. The borrowed pointer is kept alive by the
+            # `ExternalBuffer`'s strong reference until the request drops it;
+            # the cast below takes a new reference for the caller.
+            owner_ptr = _ucxx_external_buffer_owner(buf.get())
+            if owner_ptr == NULL:
+                return None
+            return <object>owner_ptr
 
     def get_request(self) -> UCXRequest:
         warnings.warn(
@@ -1497,6 +1618,42 @@ cdef void _am_receiver_callback(
         cb_data["cb_func"](request, int(<uintptr_t>ep))
     except Exception as e:
         logger.error(f"{type(e)} when calling AM receiver callback: {e}")
+
+
+cdef shared_ptr[Buffer] _am_host_allocator(size_t size, void* args) with gil:
+    """Trampoline for the AM host allocator registered from Python.
+
+    Runs on the UCXX progress thread with the GIL acquired; the Python
+    callback must not block. `args` is a borrowed reference to the data dict
+    kept alive by `UCXWorker._am_host_allocator_data`. Never propagates an
+    exception and never returns null: any failure or a `None` from the
+    callback falls back to a default internal host allocation, since the
+    eager receive path treats a null buffer as a fatal `UCS_ERR_NO_MEMORY`.
+    """
+    cdef dict cb_data = <dict>args
+    cdef Array arr
+
+    try:
+        obj = cb_data["cb_func"](size)
+        if obj is not None:
+            arr = Array(obj)
+            if arr.cuda or arr.readonly or not arr._contiguous():
+                raise ValueError(
+                    "AM host allocator must return writable contiguous "
+                    "host memory"
+                )
+            if arr.nbytes < size:
+                raise ValueError(
+                    f"AM host allocator returned {arr.nbytes} bytes, "
+                    f"need {size}"
+                )
+            return _ucxx_make_external_buffer(
+                <void*>arr.ptr, size, <PyObject*>obj
+            )
+    except Exception as e:
+        logger.error(f"{type(e)} when calling AM host allocator: {e}")
+
+    return _ucxx_make_default_host_buffer(size)
 
 
 cdef void _endpoint_close_callback(ucs_status_t status, shared_ptr[void] args) with gil:

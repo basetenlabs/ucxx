@@ -60,6 +60,7 @@ cdef class UCXWorker:
         bint _enable_python_future
         uint64_t _context_feature_flags
         dict _am_receiver_callbacks
+        dict _am_host_allocator_data
 
     cdef shared_ptr[Worker] get_ucxx_shared_ptr(self) nogil
 
