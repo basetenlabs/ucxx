@@ -126,6 +126,8 @@ class Endpoint : public Component {
    */
   friend void endpointErrorCallback(void* arg, ucp_ep_h ep, ucs_status_t status);
 
+  friend class RequestAm;
+
  public:
   Endpoint()                           = delete;
   Endpoint(const Endpoint&)            = delete;

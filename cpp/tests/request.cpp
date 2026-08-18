@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -203,6 +204,30 @@ class RequestTest : public ::testing::TestWithParam<
     }
   }
 };
+
+TEST(RequestLifecycleTest, DelayedAmStopsAfterCancellationOrEndpointClose)
+{
+  auto context = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
+  auto worker  = context->createWorker(true);
+  auto ep      = worker->createEndpointFromWorkerAddress(worker->getAddress());
+  int value{42};
+
+  auto canceled = ep->amSend(&value, sizeof(value), UCS_MEMORY_TYPE_HOST);
+  canceled->cancel();
+  canceled->populateDelayedSubmission();
+  EXPECT_EQ(canceled->getStatus(), UCS_ERR_CANCELED);
+
+  auto closeRequest = ep->close();
+  ASSERT_NE(closeRequest, nullptr);
+  auto closing = ep->amSend(&value, sizeof(value), UCS_MEMORY_TYPE_HOST);
+  closing->populateDelayedSubmission();
+  EXPECT_EQ(closing->getStatus(), UCS_ERR_CANCELED);
+
+  worker->startProgressThread(true);
+  EXPECT_TRUE(loopWithTimeout(std::chrono::seconds(3),
+                              [&closeRequest]() { return closeRequest->isCompleted(); }));
+  worker->stopProgressThread();
+}
 
 TEST_P(RequestTest, ProgressAm)
 {
