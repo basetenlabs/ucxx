@@ -882,6 +882,26 @@ class Worker : public Component {
     const std::vector<std::string>& deviceNames);
 
   /**
+   * @brief Stop using a local device for any future lane selection.
+   *
+   * Retires `deviceName` from the set this worker's context draws on. Endpoints
+   * already created keep their lanes.
+   *
+   * Needed alongside `getAddressWithDevices()`, not instead of it: that one stops
+   * peers writing to the device, this one stops *us* selecting it for our own
+   * outbound wireup. A worker that only does the former keeps failing UD connect
+   * against a dead port, because IB port state is read at device init and a port
+   * that dies later still looks usable.
+   *
+   * Not reversible -- restoring a device needs a new context.
+   *
+   * @param[in] deviceName device name as in UCX_NET_DEVICES, e.g. "mlx5_0:1".
+   *
+   * @throws ucxx::Error if the device has no resources on this context.
+   */
+  void excludeDevice(const std::string& deviceName);
+
+  /**
    * @brief Create endpoint to worker listening on specific IP and port.
    *
    * Creates an endpoint to a remote worker listening on a specific IP address and port.

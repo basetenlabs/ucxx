@@ -204,6 +204,10 @@ class ApplicationContext:
     def worker_address(self):
         return self.worker.address
 
+    def exclude_device(self, device_name):
+        """Retire a local NIC from future lane selection on this worker."""
+        return self.worker.exclude_device(device_name)
+
     def worker_address_with_devices(self, device_names):
         """Worker address listing only ``device_names``.
 

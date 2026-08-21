@@ -872,6 +872,14 @@ cdef class UCXWorker():
         """Address advertising only ``device_names`` of this worker's NICs."""
         return UCXAddress.create_from_worker_with_devices(self, device_names)
 
+    def exclude_device(self, object device_name) -> None:
+        """Retire a local NIC from all future UCX lane selection."""
+        cdef string name = (
+            device_name.encode("utf-8") if isinstance(device_name, str) else device_name
+        )
+        with nogil:
+            self._worker.get().excludeDevice(name)
+
     @property
     def enable_delayed_submission(self) -> bool:
         return self._enable_delayed_submission

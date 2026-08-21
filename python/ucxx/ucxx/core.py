@@ -258,6 +258,10 @@ def get_worker_address_with_devices(device_names):
     return _get_ctx().worker_address_with_devices(device_names)
 
 
+def exclude_device(device_name):
+    return _get_ctx().exclude_device(device_name)
+
+
 def register_am_receiver_callback(owner, identifier, cb_func):
     return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
 
@@ -306,6 +310,7 @@ __all__ = [
     "get_ucxx_worker",
     "get_worker_address",
     "get_worker_address_with_devices",
+    "exclude_device",
     "get_ucx_address_from_buffer",
     "recv",
     "register_am_receiver_callback",

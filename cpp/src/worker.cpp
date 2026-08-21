@@ -710,6 +710,11 @@ std::shared_ptr<Address> Worker::getAddress()
   return address;
 }
 
+void Worker::excludeDevice(const std::string& deviceName)
+{
+  utils::ucsErrorThrow(ucp_worker_exclude_device(_handle, deviceName.c_str()));
+}
+
 std::shared_ptr<Address> Worker::getAddressWithDevices(
   const std::vector<std::string>& deviceNames)
 {

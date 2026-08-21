@@ -269,6 +269,7 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         shared_ptr[Address] getAddressWithDevices(
             const vector[string]& device_names
         ) except +raise_py_error
+        void excludeDevice(const string& device_name) except +raise_py_error
         shared_ptr[Endpoint] createEndpointFromHostname(
             string ip_address, uint16_t port, bint endpoint_error_handling
         ) except +raise_py_error
