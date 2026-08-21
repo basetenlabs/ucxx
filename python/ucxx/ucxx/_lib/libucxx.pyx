@@ -669,6 +669,34 @@ cdef class UCXAddress():
         return address
 
     @classmethod
+    def create_from_worker_with_devices(
+        cls, UCXWorker worker, object device_names
+    ) -> UCXAddress:
+        """Worker address advertising only ``device_names``.
+
+        A peer chooses which of this worker's NICs to write to from the address
+        entries alone, so withdrawing a dead device means publishing an address
+        without it. Separate classmethod rather than an argument on
+        ``create_from_worker`` so existing callers are untouched.
+        """
+        cdef UCXAddress address = UCXAddress.__new__(UCXAddress)
+        cdef vector[string] names
+
+        for name in device_names:
+            names.push_back(name.encode("utf-8") if isinstance(name, str) else name)
+        if names.empty():
+            raise ValueError("At least one device name must be given")
+
+        address._bytes = None
+        with nogil:
+            address._address = worker._worker.get().getAddressWithDevices(names)
+            address._handle = address._address.get().getHandle()
+            address._length = address._address.get().getLength()
+            address._string = address._address.get().getStringView()
+
+        return address
+
+    @classmethod
     def create_from_buffer(cls, const uint8_t[::1] buf) -> UCXAddress:
         cdef UCXAddress address = UCXAddress.__new__(UCXAddress)
         cdef string_view address_strv = string_view(<const char*>&buf[0], len(buf))
@@ -840,6 +868,10 @@ cdef class UCXWorker():
     def address(self) -> UCXAddress:
         return UCXAddress.create_from_worker(self)
 
+    def address_with_devices(self, object device_names) -> UCXAddress:
+        """Address advertising only ``device_names`` of this worker's NICs."""
+        return UCXAddress.create_from_worker_with_devices(self, device_names)
+
     @property
     def enable_delayed_submission(self) -> bool:
         return self._enable_delayed_submission
@@ -885,6 +917,16 @@ cdef class UCXWorker():
     ) -> UCXEndpoint:
         return UCXEndpoint.create_from_worker_address(
             self, address, endpoint_error_handling
+        )
+
+    def create_endpoint_from_worker_address_with_device(
+            self,
+            UCXAddress address,
+            bint endpoint_error_handling,
+            local_device
+    ) -> UCXEndpoint:
+        return UCXEndpoint.create_from_worker_address_with_device(
+            self, address, endpoint_error_handling, local_device
         )
 
     def init_blocking_progress_mode(self) -> None:
@@ -1732,6 +1774,44 @@ cdef class UCXEndpoint():
             endpoint._cuda_support = ucxx_context.get().hasCudaSupport()
             endpoint._endpoint = listener._listener.get().createEndpointFromConnRequest(
                 <ucp_conn_request_h>conn_request, endpoint_error_handling
+            )
+
+        return endpoint
+
+    @classmethod
+    def create_from_worker_address_with_device(
+            cls,
+            UCXWorker worker,
+            UCXAddress address,
+            bint endpoint_error_handling,
+            local_device
+    ) -> UCXEndpoint:
+        """Create an endpoint pinned to one local device.
+
+        Separate from create_from_worker_address so the existing entry point,
+        and the C++ symbol behind it, are left untouched.
+        """
+        cdef UCXEndpoint endpoint = UCXEndpoint.__new__(UCXEndpoint)
+        cdef shared_ptr[Context] ucxx_context
+        cdef shared_ptr[Address] ucxx_address = address._address
+        # Encode before the nogil block, which must touch no Python objects.
+        cdef string ucxx_local_device = (
+            local_device.encode("utf-8") if local_device else b""
+        )
+
+        endpoint._enable_python_future = worker.enable_python_future
+
+        with nogil:
+            ucxx_context = dynamic_pointer_cast[Context, Component](
+                worker._worker.get().getParent()
+            )
+
+            endpoint._context_feature_flags = ucxx_context.get().getFeatureFlags()
+            endpoint._cuda_support = ucxx_context.get().hasCudaSupport()
+            endpoint._endpoint = (
+                worker._worker.get().createEndpointFromWorkerAddressWithDevice(
+                    ucxx_address, endpoint_error_handling, ucxx_local_device
+                )
             )
 
         return endpoint

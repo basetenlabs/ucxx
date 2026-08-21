@@ -213,6 +213,12 @@ class Endpoint : public Component {
                                                                    std::shared_ptr<Address> address,
                                                                    bool endpointErrorHandling);
 
+  friend std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
+    std::shared_ptr<Worker> worker,
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    const std::string& localDevice);
+
   /**
    * @brief Get the underlying `ucp_ep_h` handle.
    *

@@ -204,6 +204,15 @@ class ApplicationContext:
     def worker_address(self):
         return self.worker.address
 
+    def worker_address_with_devices(self, device_names):
+        """Worker address listing only ``device_names``.
+
+        Used to withdraw a NIC from what peers may write to: they select the
+        destination device from the address entries alone, so an address that
+        still lists a dead NIC keeps drawing traffic to it.
+        """
+        return self.worker.address_with_devices(device_names)
+
     def register_am_receiver_callback(self, owner, identifier, cb_func):
         """Register a worker-scoped active message receiver callback.
 
@@ -468,6 +477,53 @@ class ApplicationContext:
         logger.debug(
             "create_endpoint() client: %s, error handling: %s"
             % (hex(ep._ep.handle), endpoint_error_handling)
+        )
+
+        return ep
+
+    async def create_endpoint_from_worker_address_with_device(
+        self,
+        address,
+        endpoint_error_handling=True,
+        local_device=None,
+    ):
+        """Create an endpoint pinned to one local device.
+
+        Parameters
+        ----------
+        address: UCXAddress
+        endpoint_error_handling: boolean, optional
+            As in `create_endpoint_from_worker_address`.
+        local_device: str, optional
+            Name of the local device to restrict this endpoint's lanes to, e.g.
+            "mlx5_bond_0:1". Unlike UCX_NET_DEVICES, which is fixed at context
+            creation and applies to every endpoint on the worker, this affects
+            only this endpoint. Intended for application-level NIC failover: a
+            pinned endpoint makes a transport failure attributable to one
+            device, so a replacement can be built on another. An unknown device
+            name fails endpoint creation rather than silently falling back.
+
+        Returns
+        -------
+        Endpoint
+            The new endpoint
+        """
+        self.continuous_ucx_progress()
+
+        ucx_ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+            self.worker,
+            address,
+            endpoint_error_handling,
+            local_device,
+        )
+        if not self.progress_mode.startswith("thread"):
+            self.worker.progress()
+
+        ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
+
+        logger.debug(
+            "create_endpoint_with_device() client: %s, error handling: %s, device: %s"
+            % (hex(ep._ep.handle), endpoint_error_handling, local_device)
         )
 
         return ep

@@ -202,6 +202,18 @@ async def create_endpoint_from_worker_address(
     )
 
 
+async def create_endpoint_from_worker_address_with_device(
+    address,
+    endpoint_error_handling=True,
+    local_device=None,
+):
+    return await _get_ctx().create_endpoint_from_worker_address_with_device(
+        address,
+        endpoint_error_handling=endpoint_error_handling,
+        local_device=local_device,
+    )
+
+
 def get_ucp_context_info():
     """Gets information on the current UCX context, obtained from
     `ucp_context_print_info`.
@@ -240,6 +252,10 @@ def get_ucxx_worker():
 
 def get_worker_address():
     return _get_ctx().worker_address
+
+
+def get_worker_address_with_devices(device_names):
+    return _get_ctx().worker_address_with_devices(device_names)
 
 
 def register_am_receiver_callback(owner, identifier, cb_func):
@@ -281,6 +297,7 @@ __all__ = [
     "create_listener",
     "create_endpoint",
     "create_endpoint_from_worker_address",
+    "create_endpoint_from_worker_address_with_device",
     "get_ucp_context_info",
     "get_ucp_worker_info",
     "get_active_transports",
@@ -288,6 +305,7 @@ __all__ = [
     "get_ucp_worker",
     "get_ucxx_worker",
     "get_worker_address",
+    "get_worker_address_with_devices",
     "get_ucx_address_from_buffer",
     "recv",
     "register_am_receiver_callback",

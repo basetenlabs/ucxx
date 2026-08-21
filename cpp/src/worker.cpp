@@ -710,6 +710,14 @@ std::shared_ptr<Address> Worker::getAddress()
   return address;
 }
 
+std::shared_ptr<Address> Worker::getAddressWithDevices(
+  const std::vector<std::string>& deviceNames)
+{
+  auto worker  = std::dynamic_pointer_cast<Worker>(shared_from_this());
+  auto address = ucxx::createAddressFromWorkerWithDevices(worker, deviceNames);
+  return address;
+}
+
 std::shared_ptr<Endpoint> Worker::createEndpointFromHostname(std::string ipAddress,
                                                              uint16_t port,
                                                              bool endpointErrorHandling)
@@ -724,6 +732,15 @@ std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddress(std::shared_pt
 {
   auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
   auto endpoint = ucxx::createEndpointFromWorkerAddress(worker, address, endpointErrorHandling);
+  return endpoint;
+}
+
+std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddressWithDevice(
+  std::shared_ptr<Address> address, bool endpointErrorHandling, const std::string& localDevice)
+{
+  auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
+  auto endpoint = ucxx::createEndpointFromWorkerAddressWithDevice(
+    worker, address, endpointErrorHandling, localDevice);
   return endpoint;
 }
 

@@ -12,6 +12,7 @@
 #include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <ucp/api/ucp.h>
 
@@ -855,6 +856,32 @@ class Worker : public Component {
   [[nodiscard]] std::shared_ptr<Address> getAddress();
 
   /**
+   * @brief Get the worker address, listing only the given local devices.
+   *
+   * Like `getAddress()`, but the returned address advertises only the transport
+   * resources of `deviceNames`.
+   *
+   * This is what lets a worker steer its peers away from one of its own NICs. A
+   * peer picks which of this worker's devices to write to from the address
+   * entries alone, so an address that still lists a dead device keeps inviting
+   * traffic to it, and nothing the peer does locally can avoid that. Publishing
+   * a restricted address is the only way to withdraw a device.
+   *
+   * Separate from `getAddress()` rather than a defaulted argument, so already
+   * built consumers of libucxx.so keep working.
+   *
+   * @param[in] deviceNames device names as they appear in UCX_NET_DEVICES, e.g.
+   *                        "mlx5_0". Must not be empty.
+   *
+   * @throws std::invalid_argument if `deviceNames` is empty.
+   * @throws ucxx::Error if none of the named devices has usable resources.
+   *
+   * @returns The address of the local worker, restricted to those devices.
+   */
+  [[nodiscard]] std::shared_ptr<Address> getAddressWithDevices(
+    const std::vector<std::string>& deviceNames);
+
+  /**
    * @brief Create endpoint to worker listening on specific IP and port.
    *
    * Creates an endpoint to a remote worker listening on a specific IP address and port.
@@ -911,6 +938,17 @@ class Worker : public Component {
    */
   [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(
     std::shared_ptr<Address> address, bool endpointErrorHandling = true);
+
+  /**
+   * @brief Like createEndpointFromWorkerAddress, pinned to one local device.
+   *
+   * Separate name rather than an added parameter: changing the existing
+   * signature would change its mangled name and break already-built consumers.
+   */
+  [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    const std::string& localDevice);
 
   /**
    * @brief Listen for remote connections on given port.
