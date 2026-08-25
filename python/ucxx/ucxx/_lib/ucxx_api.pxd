@@ -266,11 +266,19 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         ucp_worker_h getHandle()
         string getInfo() except +raise_py_error
         shared_ptr[Address] getAddress() except +raise_py_error
+        shared_ptr[Address] getAddressWithDevices(
+            const vector[string]& device_names
+        ) except +raise_py_error
+        void excludeDevice(const string& device_name) except +raise_py_error
         shared_ptr[Endpoint] createEndpointFromHostname(
             string ip_address, uint16_t port, bint endpoint_error_handling
         ) except +raise_py_error
         shared_ptr[Endpoint] createEndpointFromWorkerAddress(
             shared_ptr[Address] address, bint endpoint_error_handling
+        ) except +raise_py_error
+        shared_ptr[Endpoint] createEndpointFromWorkerAddressWithDevice(
+            shared_ptr[Address] address, bint endpoint_error_handling,
+            const string& local_device
         ) except +raise_py_error
         shared_ptr[Listener] createListener(
             uint16_t port, ucp_listener_conn_callback_t callback, void *callback_args
