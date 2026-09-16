@@ -184,6 +184,59 @@ TEST_F(WorkerTest, QueryAttributes)
   EXPECT_GT(attrs.maxDebugString, 0u);
 }
 
+TEST_F(WorkerTest, QueryDevices)
+{
+  auto devices = _worker->queryDevices();
+
+  ASSERT_FALSE(devices.empty());
+  for (const auto& device : devices) {
+    EXPECT_FALSE(device.name.empty());
+    EXPECT_FALSE(device.transport.empty());
+    // RemoteDeviceAttr::reachableFromLocal is a 64-bit bitmap keyed by this
+    // index, so an index at or past 64 would be dropped from it silently.
+    EXPECT_LT(device.index, 64u);
+  }
+}
+
+TEST_F(WorkerTest, QueryDevicesExcludesRetiredDevice)
+{
+  auto devices = _worker->queryDevices();
+  ASSERT_FALSE(devices.empty());
+  const auto retired = devices.front().name;
+
+  _worker->excludeDevice(retired);
+
+  for (const auto& device : _worker->queryDevices())
+    EXPECT_NE(device.name, retired);
+}
+
+TEST_F(WorkerTest, QueryAddressDevices)
+{
+  auto entries = _worker->queryAddressDevices(_worker->getAddress());
+
+  ASSERT_FALSE(entries.empty());
+
+  // Loopback decides no reachability, so what is checked here is that the two
+  // queries agree: every bit set in a reachability bitmap names a device that
+  // queryDevices() reports. Whether the right bits are set is the two-pod
+  // harness's verdict.
+  uint64_t known = 0;
+  for (const auto& device : _worker->queryDevices())
+    known |= uint64_t{1} << device.index;
+
+  uint64_t reachable = 0;
+  for (const auto& entry : entries) {
+    EXPECT_LT(entry.index, 64u);
+    reachable |= entry.reachableFromLocal;
+  }
+  EXPECT_EQ(reachable & ~known, 0u);
+}
+
+TEST_F(WorkerTest, QueryAddressDevicesRejectsNullAddress)
+{
+  EXPECT_THROW(std::ignore = _worker->queryAddressDevices(nullptr), ucxx::Error);
+}
+
 TEST_P(WorkerCapabilityTest, CheckCapability)
 {
   ASSERT_EQ(_worker->isDelayedRequestSubmissionEnabled(), _enableDelayedSubmission);

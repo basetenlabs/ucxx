@@ -18,6 +18,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <ucxx/address.h>
 #include <ucxx/buffer.h>
 #include <ucxx/internal/request_am.h>
 #include <ucxx/request_am.h>
@@ -715,12 +716,78 @@ void Worker::excludeDevice(const std::string& deviceName)
   utils::ucsErrorThrow(ucp_worker_exclude_device(_handle, deviceName.c_str()));
 }
 
-std::shared_ptr<Address> Worker::getAddressWithDevices(
-  const std::vector<std::string>& deviceNames)
+std::shared_ptr<Address> Worker::getAddressWithDevices(const std::vector<std::string>& deviceNames)
 {
   auto worker  = std::dynamic_pointer_cast<Worker>(shared_from_this());
   auto address = ucxx::createAddressFromWorkerWithDevices(worker, deviceNames);
   return address;
+}
+
+std::vector<DeviceAttr> Worker::queryDevices()
+{
+  unsigned count = 0;
+  utils::ucsErrorThrow(ucp_worker_query_devices(_handle, nullptr, &count));
+
+  std::vector<ucp_worker_device_attr_t> raw(count);
+  // A device retired between the two calls shrinks `count`; one appearing makes
+  // the second call fail with UCS_ERR_BUFFER_TOO_SMALL rather than truncate.
+  if (count > 0) utils::ucsErrorThrow(ucp_worker_query_devices(_handle, raw.data(), &count));
+  raw.resize(count);
+
+  std::vector<DeviceAttr> devices;
+  devices.reserve(raw.size());
+  for (const auto& attr : raw) {
+    DeviceAttr device;
+    device.name      = attr.dev_name;
+    device.transport = attr.tl_name;
+    device.index     = attr.dev_index;
+    device.sysDevice = attr.sys_device;
+    device.bandwidth = attr.bandwidth;
+    device.latency   = attr.latency;
+    device.overhead  = attr.overhead;
+    device.numPaths  = attr.num_paths;
+    device.segSize   = attr.seg_size;
+    device.capFlags  = attr.cap_flags;
+    devices.push_back(std::move(device));
+  }
+  return devices;
+}
+
+std::vector<RemoteDeviceAttr> Worker::queryAddressDevices(std::shared_ptr<Address> address)
+{
+  if (address == nullptr || address->getHandle() == nullptr)
+    throw ucxx::Error("Address not initialized");
+
+  const ucp_address_t* handle = address->getHandle();
+  unsigned count              = 0;
+  utils::ucsErrorThrow(ucp_address_query_devices(_handle, handle, nullptr, &count));
+
+  std::vector<ucp_address_device_attr_t> raw(count);
+  if (count > 0)
+    utils::ucsErrorThrow(ucp_address_query_devices(_handle, handle, raw.data(), &count));
+  raw.resize(count);
+
+  std::vector<RemoteDeviceAttr> entries;
+  entries.reserve(raw.size());
+  for (const auto& attr : raw) {
+    RemoteDeviceAttr entry;
+    entry.index              = attr.dev_index;
+    entry.sysDevice          = attr.sys_dev;
+    entry.numPaths           = attr.num_paths;
+    entry.bandwidth          = attr.bandwidth;
+    entry.latency            = attr.latency;
+    entry.overhead           = attr.overhead;
+    entry.segSize            = attr.seg_size;
+    entry.flags              = attr.flags;
+    entry.reachableFromLocal = attr.reachable_dev_bitmap;
+    // `dev_addr` points into the packed address and is valid only while it is.
+    // A caller holding an entry cannot be held to keeping that blob alive, so the
+    // bytes are copied; a device address is tens of bytes.
+    const auto* bytes = static_cast<const uint8_t*>(attr.dev_addr);
+    if (bytes != nullptr) entry.deviceAddress.assign(bytes, bytes + attr.dev_addr_len);
+    entries.push_back(std::move(entry));
+  }
+  return entries;
 }
 
 std::shared_ptr<Endpoint> Worker::createEndpointFromHostname(std::string ipAddress,
@@ -741,11 +808,14 @@ std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddress(std::shared_pt
 }
 
 std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddressWithDevice(
-  std::shared_ptr<Address> address, bool endpointErrorHandling, const std::string& localDevice)
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  const std::string& localDevice,
+  std::optional<unsigned> remoteDevice)
 {
   auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
   auto endpoint = ucxx::createEndpointFromWorkerAddressWithDevice(
-    worker, address, endpointErrorHandling, localDevice);
+    worker, address, endpointErrorHandling, localDevice, remoteDevice);
   return endpoint;
 }
 

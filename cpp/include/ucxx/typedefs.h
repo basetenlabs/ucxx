@@ -318,4 +318,59 @@ struct AmReceiverCallbackOwnerHash {
   }
 };
 
+/**
+ * @brief One transport resource of the local worker.
+ *
+ * Owned by @c Worker, which reports it from @c Worker::queryDevices(). A device
+ * carrying several transports produces one entry per transport, all sharing
+ * @c index, because UCX selects lanes per transport and not per device.
+ */
+struct DeviceAttr {
+  std::string name{};       ///< Device name, in the spelling `localDevice` takes, e.g.
+                            ///< "mlx5_bond_0:1".
+  std::string transport{};  ///< Transport name, e.g. "rc_mlx5".
+  unsigned index{};         ///< Groups this worker's entries by device. Local to this worker:
+                            ///< a peer numbers the same device differently.
+  ucs_sys_device_t sysDevice{UCS_SYS_DEVICE_ID_UNKNOWN};  ///< Topology identifier of the device.
+  double bandwidth{};                                     ///< Interface bandwidth, in bytes/s.
+  double latency{};     ///< Interface latency with no endpoints open, in seconds.
+  double overhead{};    ///< Per-message overhead, in seconds.
+  unsigned numPaths{};  ///< Number of network paths the device exposes.
+  size_t segSize{};     ///< Largest message received in one segment, in bytes.
+  uint64_t capFlags{};  ///< Interface capability flags, `UCT_IFACE_FLAG_xx`.
+};
+
+/**
+ * @brief One transport resource a peer's packed worker address advertises.
+ *
+ * Owned by @c Worker, which reports it from @c Worker::queryAddressDevices() --
+ * the reachability it carries is relative to the querying worker, so this cannot
+ * be read from an @c Address alone.
+ */
+struct RemoteDeviceAttr {
+  unsigned index{};  ///< The value to pass as `remoteDevice` when creating an endpoint.
+                     ///< Meaningful only for the address it was read from.
+  ucs_sys_device_t sysDevice{UCS_SYS_DEVICE_ID_UNKNOWN};  ///< Peer's topology identifier.
+  unsigned numPaths{};                                    ///< Paths the peer device exposes.
+  double bandwidth{};                                     ///< Peer interface bandwidth, bytes/s.
+  double latency{};                                       ///< Peer interface latency, seconds.
+  double overhead{};                                      ///< Peer per-message overhead, seconds.
+  size_t segSize{};                                       ///< Peer segment size, in bytes.
+  uint64_t flags{};                      ///< Peer interface capability and event flags.
+  uint64_t reachableFromLocal{};         ///< Bit `i` is set if the local device whose
+                                         ///< @c DeviceAttr::index is `i` reaches this entry.
+  std::vector<uint8_t> deviceAddress{};  ///< Peer device address (e.g. a GID), copied out of
+                                         ///< the packed address so it outlives it.
+};
+
+/**
+ * @brief The transport and device an endpoint selected for one of its lanes.
+ *
+ * Owned by @c Endpoint, which reports it from @c Endpoint::getTransports().
+ */
+struct TransportEntry {
+  std::string transport{};  ///< Transport name, e.g. "rc_mlx5".
+  std::string device{};     ///< Device name, e.g. "mlx5_bond_0:1".
+};
+
 }  // namespace ucxx

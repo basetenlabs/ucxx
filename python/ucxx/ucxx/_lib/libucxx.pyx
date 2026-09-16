@@ -880,6 +880,65 @@ cdef class UCXWorker():
         with nogil:
             self._worker.get().excludeDevice(name)
 
+    def query_devices(self) -> list:
+        """Transport resources this worker can select lanes from.
+
+        One dict per transport resource, so a device carrying several transports
+        appears once per transport with the same ``index``. ``name`` is the
+        spelling ``local_device`` takes; a device retired by ``exclude_device``
+        is absent.
+        """
+        cdef vector[DeviceAttr] devices
+
+        with nogil:
+            devices = self._worker.get().queryDevices()
+
+        result = []
+        for i in range(devices.size()):
+            result.append({
+                "name": devices[i].name.decode("utf-8"),
+                "transport": devices[i].transport.decode("utf-8"),
+                "index": devices[i].index,
+                "sys_device": devices[i].sysDevice,
+                "bandwidth": devices[i].bandwidth,
+                "latency": devices[i].latency,
+                "overhead": devices[i].overhead,
+                "num_paths": devices[i].numPaths,
+                "seg_size": devices[i].segSize,
+                "cap_flags": devices[i].capFlags,
+            })
+        return result
+
+    def query_address_devices(self, UCXAddress address) -> list:
+        """Devices a peer's worker address advertises.
+
+        One dict per address entry, in advertised order. ``index`` is what
+        ``remote_device`` takes when creating an endpoint to *this* address, and
+        means nothing for any other. ``reachable_from_local`` is a bitmap over
+        ``query_devices()`` indices, so it is a fact about this worker.
+        """
+        cdef shared_ptr[Address] ucxx_address = address._address
+        cdef vector[RemoteDeviceAttr] entries
+
+        with nogil:
+            entries = self._worker.get().queryAddressDevices(ucxx_address)
+
+        result = []
+        for i in range(entries.size()):
+            result.append({
+                "index": entries[i].index,
+                "sys_device": entries[i].sysDevice,
+                "num_paths": entries[i].numPaths,
+                "bandwidth": entries[i].bandwidth,
+                "latency": entries[i].latency,
+                "overhead": entries[i].overhead,
+                "seg_size": entries[i].segSize,
+                "flags": entries[i].flags,
+                "reachable_from_local": entries[i].reachableFromLocal,
+                "device_address": bytes(entries[i].deviceAddress),
+            })
+        return result
+
     @property
     def enable_delayed_submission(self) -> bool:
         return self._enable_delayed_submission
@@ -931,10 +990,11 @@ cdef class UCXWorker():
             self,
             UCXAddress address,
             bint endpoint_error_handling,
-            local_device
+            local_device,
+            remote_device=None
     ) -> UCXEndpoint:
         return UCXEndpoint.create_from_worker_address_with_device(
-            self, address, endpoint_error_handling, local_device
+            self, address, endpoint_error_handling, local_device, remote_device
         )
 
     def init_blocking_progress_mode(self) -> None:
@@ -1792,12 +1852,16 @@ cdef class UCXEndpoint():
             UCXWorker worker,
             UCXAddress address,
             bint endpoint_error_handling,
-            local_device
+            local_device,
+            remote_device=None
     ) -> UCXEndpoint:
-        """Create an endpoint pinned to one local device.
+        """Create an endpoint pinned to one device at each end.
 
         Separate from create_from_worker_address so the existing entry point,
-        and the C++ symbol behind it, are left untouched.
+        and the C++ symbol behind it, are left untouched. ``remote_device`` is an
+        ``index`` from ``UCXWorker.query_address_devices(address)`` for this same
+        address; an index that address does not carry fails endpoint creation
+        rather than falling back to another device.
         """
         cdef UCXEndpoint endpoint = UCXEndpoint.__new__(UCXEndpoint)
         cdef shared_ptr[Context] ucxx_context
@@ -1806,6 +1870,8 @@ cdef class UCXEndpoint():
         cdef string ucxx_local_device = (
             local_device.encode("utf-8") if local_device else b""
         )
+        cdef bint pin_remote = remote_device is not None
+        cdef unsigned int ucxx_remote_device = remote_device if pin_remote else 0
 
         endpoint._enable_python_future = worker.enable_python_future
 
@@ -1816,11 +1882,23 @@ cdef class UCXEndpoint():
 
             endpoint._context_feature_flags = ucxx_context.get().getFeatureFlags()
             endpoint._cuda_support = ucxx_context.get().hasCudaSupport()
-            endpoint._endpoint = (
-                worker._worker.get().createEndpointFromWorkerAddressWithDevice(
-                    ucxx_address, endpoint_error_handling, ucxx_local_device
+            # Two call sites for one C++ method: Cython cannot spell an
+            # `optional[unsigned]` argument, so the overload is selected by the
+            # type passed, as `am_send` does with its callback info.
+            if pin_remote:
+                endpoint._endpoint = (
+                    worker._worker.get().createEndpointFromWorkerAddressWithDevice(
+                        ucxx_address, endpoint_error_handling, ucxx_local_device,
+                        ucxx_remote_device
+                    )
                 )
-            )
+            else:
+                endpoint._endpoint = (
+                    worker._worker.get().createEndpointFromWorkerAddressWithDevice(
+                        ucxx_address, endpoint_error_handling, ucxx_local_device,
+                        nullopt
+                    )
+                )
 
         return endpoint
 
@@ -1858,6 +1936,27 @@ cdef class UCXEndpoint():
             handle = self._endpoint.get().getHandle()
 
         return int(<uintptr_t>handle)
+
+    @property
+    def transports(self) -> list:
+        """``(transport, device)`` for each lane this endpoint selected.
+
+        What UCX chose, not what was asked for: an endpoint created with a
+        ``local_device`` or ``remote_device`` is only known to have honoured it
+        by reading it back from here.
+        """
+        cdef vector[TransportEntry] entries
+
+        with nogil:
+            entries = self._endpoint.get().getTransports()
+
+        return [
+            (
+                entries[i].transport.decode("utf-8"),
+                entries[i].device.decode("utf-8"),
+            )
+            for i in range(entries.size())
+        ]
 
     @property
     def ucxx_ptr(self) -> int:

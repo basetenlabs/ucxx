@@ -4,6 +4,7 @@
  */
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -74,17 +75,18 @@ struct EndpointErrorCallbackContext {
 static ucp_err_handling_mode_t endpointErrorHandlingMode(uint64_t fieldMask)
 {
   static const bool failoverRequested = []() {
-    const char* env       = std::getenv("UCXX_ERROR_HANDLING_MODE");
-    const bool  requested = env != nullptr && std::string(env) == "failover";
+    const char* env      = std::getenv("UCXX_ERROR_HANDLING_MODE");
+    const bool requested = env != nullptr && std::string(env) == "failover";
     if (requested)
-      ucxx_info("UCXX_ERROR_HANDLING_MODE=failover: worker-address endpoints will use "
-                "UCP_ERR_HANDLING_MODE_FAILOVER (NIC/lane failover)");
+      ucxx_info(
+        "UCXX_ERROR_HANDLING_MODE=failover: worker-address endpoints will use "
+        "UCP_ERR_HANDLING_MODE_FAILOVER (NIC/lane failover)");
     return requested;
   }();
 
-  const bool isWorkerAddress = (fieldMask & UCP_EP_PARAM_FIELD_REMOTE_ADDRESS) &&
-                               !(fieldMask & (UCP_EP_PARAM_FIELD_SOCK_ADDR |
-                                              UCP_EP_PARAM_FIELD_CONN_REQUEST));
+  const bool isWorkerAddress =
+    (fieldMask & UCP_EP_PARAM_FIELD_REMOTE_ADDRESS) &&
+    !(fieldMask & (UCP_EP_PARAM_FIELD_SOCK_ADDR | UCP_EP_PARAM_FIELD_CONN_REQUEST));
 
   if (failoverRequested && isWorkerAddress) return UCP_ERR_HANDLING_MODE_FAILOVER;
   return UCP_ERR_HANDLING_MODE_PEER;
@@ -252,7 +254,8 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
   std::shared_ptr<Worker> worker,
   std::shared_ptr<Address> address,
   bool endpointErrorHandling,
-  const std::string& localDevice)
+  const std::string& localDevice,
+  std::optional<unsigned> remoteDevice)
 {
   if (worker == nullptr || worker->getHandle() == nullptr)
     throw ucxx::Error("Worker not initialized");
@@ -275,6 +278,15 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
     params.local_device = localDevice.c_str();
   }
 
+  // The peer end of the same path. `remoteDevice` indexes the entries of the
+  // address in `params.address` and nothing else, so an index from another
+  // address names a different device or none at all; UCX fails endpoint creation
+  // with UCS_ERR_NO_DEVICE in the latter case rather than picking another.
+  if (remoteDevice.has_value()) {
+    params.field_mask |= UCP_EP_PARAM_FIELD_REMOTE_DEVICE;
+    params.remote_device = *remoteDevice;
+  }
+
   auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
   ep->create(&params);
   return ep;
@@ -289,7 +301,7 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker
   // consumer of libucxx.so, including the installed Cython extension. A separate
   // entry point leaves the existing ABI untouched.
   return createEndpointFromWorkerAddressWithDevice(
-    worker, address, endpointErrorHandling, std::string());
+    worker, address, endpointErrorHandling, std::string(), std::nullopt);
 }
 
 Endpoint::~Endpoint()
@@ -423,6 +435,40 @@ void Endpoint::closeBlocking(uint64_t period, uint64_t maxAttempts)
 }
 
 ucp_ep_h Endpoint::getHandle() { return _handle; }
+
+std::vector<TransportEntry> Endpoint::getTransports()
+{
+  // ucp_ep_query truncates to the array it is handed and reports only how many
+  // entries it filled, so a full array may mean there are more lanes. The bound
+  // it stops at, UCP_MAX_LANES, is not in the public API, so grow until a call
+  // comes back short. `entry_size` is what keeps UCX from writing fields past
+  // the end of the struct this was compiled against.
+  std::vector<ucp_transport_entry_t> raw(8);
+  unsigned filled = 0;
+  for (;;) {
+    ucp_ep_attr_t attr;
+    attr.field_mask             = UCP_EP_ATTR_FIELD_TRANSPORTS;
+    attr.transports.entries     = raw.data();
+    attr.transports.num_entries = static_cast<unsigned>(raw.size());
+    attr.transports.entry_size  = sizeof(ucp_transport_entry_t);
+    utils::ucsErrorThrow(ucp_ep_query(_handle, &attr));
+
+    filled = attr.transports.num_entries;
+    if (filled < raw.size()) break;
+    raw.resize(raw.size() * 2);
+  }
+  raw.resize(filled);
+
+  std::vector<TransportEntry> transports;
+  transports.reserve(raw.size());
+  for (const auto& entry : raw) {
+    TransportEntry transport;
+    if (entry.transport_name != nullptr) transport.transport = entry.transport_name;
+    if (entry.device_name != nullptr) transport.device = entry.device_name;
+    transports.push_back(std::move(transport));
+  }
+  return transports;
+}
 
 bool Endpoint::isAlive() const
 {

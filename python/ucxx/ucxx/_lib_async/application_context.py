@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
@@ -207,6 +207,22 @@ class ApplicationContext:
     def exclude_device(self, device_name):
         """Retire a local NIC from future lane selection on this worker."""
         return self.worker.exclude_device(device_name)
+
+    def query_devices(self):
+        """Transport resources this worker can select lanes from.
+
+        One dict per transport resource; ``name`` is what ``local_device`` takes.
+        """
+        return self.worker.query_devices()
+
+    def query_address_devices(self, address):
+        """Devices a peer's worker address advertises.
+
+        One dict per address entry. ``index`` is what ``remote_device`` takes for
+        this same address, and ``reachable_from_local`` is a bitmap over this
+        worker's ``query_devices()`` indices.
+        """
+        return self.worker.query_address_devices(address)
 
     def worker_address_with_devices(self, device_names):
         """Worker address listing only ``device_names``.
@@ -488,16 +504,29 @@ class ApplicationContext:
     async def create_endpoint_from_worker_address_with_device(
         self,
         address,
+        *,
         endpoint_error_handling=True,
         local_device=None,
+        remote_device=None,
     ):
-        """Create an endpoint pinned to one local device.
+        """Create an endpoint pinned to one device at each end.
+
+        Keyword-only past `address`: the device used to be the second positional
+        parameter in callers' minds, which silently bound it to
+        `endpoint_error_handling` and left the endpoint unpinned.
 
         Parameters
         ----------
         address: UCXAddress
         endpoint_error_handling: boolean, optional
             As in `create_endpoint_from_worker_address`.
+        remote_device: int, optional
+            `index` of a peer device, from `query_address_devices(address)` for
+            this same address. Restricts this endpoint's lanes to that peer
+            device; together with `local_device` it names both ends of the path,
+            which is what places two endpoints between one pair of workers on
+            disjoint paths. An index the address does not carry fails endpoint
+            creation rather than falling back to another device.
         local_device: str, optional
             Name of the local device to restrict this endpoint's lanes to, e.g.
             "mlx5_bond_0:1". Unlike UCX_NET_DEVICES, which is fixed at context
@@ -519,6 +548,7 @@ class ApplicationContext:
             address,
             endpoint_error_handling,
             local_device,
+            remote_device,
         )
         if not self.progress_mode.startswith("thread"):
             self.worker.progress()
@@ -526,8 +556,9 @@ class ApplicationContext:
         ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
 
         logger.debug(
-            "create_endpoint_with_device() client: %s, error handling: %s, device: %s"
-            % (hex(ep._ep.handle), endpoint_error_handling, local_device)
+            "create_endpoint_with_device() client: %s, error handling: %s, "
+            "local device: %s, remote device: %s"
+            % (hex(ep._ep.handle), endpoint_error_handling, local_device, remote_device)
         )
 
         return ep

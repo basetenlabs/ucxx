@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,15 +58,18 @@ class Worker;
   std::shared_ptr<Worker> worker, std::shared_ptr<Address> address, bool endpointErrorHandling);
 
 /**
- * Like createEndpointFromWorkerAddress, but restricts the endpoint's lanes to
- * one local device (e.g. "mlx5_bond_0:1"). A separate entry point rather than an
- * extra parameter, so the existing symbol and its ABI stay intact.
+ * Like createEndpointFromWorkerAddress, but restricts the endpoint's lanes to one
+ * local device (e.g. "mlx5_bond_0:1"), one peer device, or both. A separate entry
+ * point rather than extra parameters on createEndpointFromWorkerAddress, so that
+ * symbol and its ABI stay intact. `remoteDevice` is a `RemoteDeviceAttr::index`
+ * from `Worker::queryAddressDevices(address)`, for the same `address`.
  */
 [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
   std::shared_ptr<Worker> worker,
   std::shared_ptr<Address> address,
   bool endpointErrorHandling,
-  const std::string& localDevice);
+  const std::string& localDevice,
+  std::optional<unsigned> remoteDevice = std::nullopt);
 
 [[nodiscard]] std::shared_ptr<Listener> createListener(std::shared_ptr<Worker> worker,
                                                        uint16_t port,

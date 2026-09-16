@@ -7,6 +7,7 @@
 #include <netdb.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -217,7 +218,8 @@ class Endpoint : public Component {
     std::shared_ptr<Worker> worker,
     std::shared_ptr<Address> address,
     bool endpointErrorHandling,
-    const std::string& localDevice);
+    const std::string& localDevice,
+    std::optional<unsigned> remoteDevice);
 
   /**
    * @brief Get the underlying `ucp_ep_h` handle.
@@ -235,6 +237,19 @@ class Endpoint : public Component {
    * @returns The underlying `ucp_ep_h` handle.
    */
   [[nodiscard]] ucp_ep_h getHandle();
+
+  /**
+   * @brief Report the transport and device of each lane this endpoint selected.
+   *
+   * What UCX actually chose, which is not necessarily what was asked for: an
+   * endpoint created with a `localDevice` or `remoteDevice` restriction is only
+   * known to have honoured it by reading it back from here.
+   *
+   * @throws ucxx::Error if the endpoint's attributes cannot be queried.
+   *
+   * @returns One `TransportEntry` per lane, in UCX's own order.
+   */
+  [[nodiscard]] std::vector<TransportEntry> getTransports();
 
   /**
    * @brief Check whether the endpoint is still alive.

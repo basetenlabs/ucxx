@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -902,6 +903,39 @@ class Worker : public Component {
   void excludeDevice(const std::string& deviceName);
 
   /**
+   * @brief Report the transport resources this worker can select lanes from.
+   *
+   * One entry per usable transport resource, so a caller can name a device in
+   * `createEndpointFromWorkerAddressWithDevice()` and weigh its bandwidth,
+   * latency and topology placement beforehand. A device retired by
+   * `excludeDevice()` is not reported.
+   *
+   * @throws ucxx::Error if the worker's resources cannot be queried.
+   *
+   * @returns One `DeviceAttr` per transport resource, in UCX's own order.
+   */
+  [[nodiscard]] std::vector<DeviceAttr> queryDevices();
+
+  /**
+   * @brief Report the devices a peer's worker address advertises.
+   *
+   * One entry per transport resource the address carries, so a caller can choose
+   * a peer device, pass its `RemoteDeviceAttr::index` as `remoteDevice`, and know
+   * beforehand which of this worker's devices reach it.
+   *
+   * On this worker rather than on `Address` because
+   * `RemoteDeviceAttr::reachableFromLocal` is a fact about this worker's devices,
+   * and because a peer address built from bytes has no worker to ask.
+   *
+   * @param[in] address a peer's worker address.
+   *
+   * @throws ucxx::Error if the address cannot be unpacked.
+   *
+   * @returns One `RemoteDeviceAttr` per address entry, in advertised order.
+   */
+  [[nodiscard]] std::vector<RemoteDeviceAttr> queryAddressDevices(std::shared_ptr<Address> address);
+
+  /**
    * @brief Create endpoint to worker listening on specific IP and port.
    *
    * Creates an endpoint to a remote worker listening on a specific IP address and port.
@@ -960,15 +994,27 @@ class Worker : public Component {
     std::shared_ptr<Address> address, bool endpointErrorHandling = true);
 
   /**
-   * @brief Like createEndpointFromWorkerAddress, pinned to one local device.
+   * @brief Like createEndpointFromWorkerAddress, pinned to one device at each end.
    *
-   * Separate name rather than an added parameter: changing the existing
-   * signature would change its mangled name and break already-built consumers.
+   * Separate name rather than an added parameter on
+   * `createEndpointFromWorkerAddress()`: changing that signature would change its
+   * mangled name and break already-built consumers.
+   *
+   * @param[in] address               address of the remote UCX worker.
+   * @param[in] endpointErrorHandling enable endpoint error handling if `true`.
+   * @param[in] localDevice           local device to restrict this endpoint's lanes
+   *                                  to, or empty for no local restriction.
+   * @param[in] remoteDevice          `RemoteDeviceAttr::index` from
+   *                                  `queryAddressDevices(address)`, or `std::nullopt`
+   *                                  for no remote restriction. Naming both ends is
+   *                                  what places two endpoints between the same pair
+   *                                  of workers on disjoint paths.
    */
   [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
     std::shared_ptr<Address> address,
     bool endpointErrorHandling,
-    const std::string& localDevice);
+    const std::string& localDevice,
+    std::optional<unsigned> remoteDevice = std::nullopt);
 
   /**
    * @brief Listen for remote connections on given port.

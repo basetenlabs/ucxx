@@ -204,13 +204,25 @@ async def create_endpoint_from_worker_address(
 
 async def create_endpoint_from_worker_address_with_device(
     address,
+    *,
     endpoint_error_handling=True,
     local_device=None,
+    remote_device=None,
 ):
+    """Create an endpoint pinned to one local device, one peer device, or both.
+
+    `local_device` is a name from `get_worker_devices()`; `remote_device` is an
+    `index` from `get_address_devices(address)` for this same address.
+
+    Keyword-only past `address` on purpose: a caller passing the device as the
+    second positional argument bound it to `endpoint_error_handling`, which is
+    truthy, so the endpoint was created unpinned and no error was raised.
+    """
     return await _get_ctx().create_endpoint_from_worker_address_with_device(
         address,
         endpoint_error_handling=endpoint_error_handling,
         local_device=local_device,
+        remote_device=remote_device,
     )
 
 
@@ -262,6 +274,26 @@ def exclude_device(device_name):
     return _get_ctx().exclude_device(device_name)
 
 
+def get_worker_devices():
+    """Transport resources this process's worker can select lanes from.
+
+    One dict per transport resource, so a device carrying several transports
+    appears once per transport with the same ``index``. ``name`` is the spelling
+    `create_endpoint_from_worker_address_with_device`'s `local_device` takes.
+    """
+    return _get_ctx().query_devices()
+
+
+def get_address_devices(address):
+    """Devices a peer's worker address advertises, in advertised order.
+
+    ``index`` is what `remote_device` takes for this same address and means
+    nothing for any other; ``reachable_from_local`` is a bitmap over this
+    worker's `get_worker_devices()` indices.
+    """
+    return _get_ctx().query_address_devices(address)
+
+
 def register_am_receiver_callback(owner, identifier, cb_func):
     return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
 
@@ -310,6 +342,8 @@ __all__ = [
     "get_ucxx_worker",
     "get_worker_address",
     "get_worker_address_with_devices",
+    "get_worker_devices",
+    "get_address_devices",
     "exclude_device",
     "get_ucx_address_from_buffer",
     "recv",
