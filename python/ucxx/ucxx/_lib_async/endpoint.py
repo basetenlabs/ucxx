@@ -75,7 +75,7 @@ class Endpoint:
         """``(transport, device)`` for each lane this endpoint selected.
 
         What UCX chose, not what was asked for, so it is the only way to tell
-        whether a ``local_device`` or ``remote_device`` restriction took effect.
+        whether a ``local_device`` restriction or a path took effect.
         """
         return self._ep.transports
 

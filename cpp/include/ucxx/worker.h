@@ -1005,16 +1005,36 @@ class Worker : public Component {
    * @param[in] localDevice           local device to restrict this endpoint's lanes
    *                                  to, or empty for no local restriction.
    * @param[in] remoteDevice          `RemoteDeviceAttr::index` from
-   *                                  `queryAddressDevices(address)`, or `std::nullopt`
-   *                                  for no remote restriction. Naming both ends is
-   *                                  what places two endpoints between the same pair
-   *                                  of workers on disjoint paths.
    */
   [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
     std::shared_ptr<Address> address,
     bool endpointErrorHandling,
-    const std::string& localDevice,
-    std::optional<unsigned> remoteDevice = std::nullopt);
+    const std::string& localDevice);
+
+  /**
+   * @brief Create an endpoint on one path: both ends, neither optional.
+   *
+   * Every lane is selected on that pair of devices, and the creation fails
+   * where the pair affords none rather than selecting elsewhere. Naming both
+   * ends is what places two endpoints between the same pair of workers on
+   * disjoint paths.
+   *
+   * @param[in] address               the remote worker's address.
+   * @param[in] endpointErrorHandling whether to enable endpoint error handling.
+   * @param[in] localDeviceIndex      a `DeviceAttr::index` from `queryDevices()`.
+   * @param[in] remoteDeviceIndex     a `RemoteDeviceAttr::index` from
+   *                                  `queryAddressDevices(address)`, valid for
+   *                                  that address alone.
+   *
+   * @throws ucxx::Error if the pair affords no lane.
+   *
+   * @returns The `shared_ptr<ucxx::Endpoint>` object
+   */
+  [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    unsigned localDeviceIndex,
+    unsigned remoteDeviceIndex);
 
   /**
    * @brief Listen for remote connections on given port.

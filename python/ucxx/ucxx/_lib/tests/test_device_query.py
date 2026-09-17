@@ -87,43 +87,75 @@ def test_endpoint_transports(worker):
     assert all(transport for transport, _device in transports)
 
 
-@pytest.mark.skip(
-    reason="aborts inside UCX on A1's restricted path: wireup.c:412 "
-    "`ep_addr_index < address->num_ep_addrs`, several p2p lanes landing on one "
-    "address entry. Not reachable from anything in this layer."
-)
-def test_remote_device_pin_is_honoured(worker):
+def test_a_path_is_honoured(worker):
     address = worker.address
     entries = worker.query_address_devices(address)
+    devices = worker.query_devices()
 
-    # Every advertised device is tried, because not all of them can carry this
-    # connection: an address advertises `self/memory` too, and restricting an
-    # endpoint to it leaves no usable transport, which UCX reports as
-    # unreachable rather than falling back to another device.
-    pinned = 0
-    for entry in entries:
+    # Every pair is tried, because most of them cannot carry this connection:
+    # the listing's first device is `memory` on this node, an address advertises
+    # `self/memory` too, and a path whose two ends cannot reach each other
+    # affords no lane -- which UCX reports as unreachable rather than falling
+    # back to a device the caller did not name. One working pair is the claim.
+    #
+    # Unskipped with the path API: the abort this used to hit -- several p2p
+    # lanes drawing on one address entry -- is what selection now refuses.
+    on_path = 0
+    for device in devices:
+        for entry in entries:
+            try:
+                ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+                    worker,
+                    address,
+                    True,
+                    None,
+                    remote_device_index=entry["index"],
+                    local_device_index=device["index"],
+                )
+            except UCXError:
+                continue
+            worker.progress()
+
+            # Loopback decides no reachability, so the verdict reachable here is
+            # that the path was accepted and lanes were still selected. Which
+            # port carries bytes is the two-pod harness's answer.
+            assert ep.transports
+            on_path += 1
+
+    assert on_path > 0
+
+
+def test_a_path_rejects_an_unknown_peer_index(worker):
+    address = worker.address
+    unknown = max(entry["index"] for entry in worker.query_address_devices(address)) + 1
+    devices = worker.query_devices()
+
+    with pytest.raises(UCXNoDeviceError):
+        ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+            worker,
+            address,
+            True,
+            None,
+            remote_device_index=unknown,
+            local_device_index=devices[0]["index"],
+        )
+
+
+def test_half_a_path_names_this_end_only(worker):
+    """A local device with no peer index is the one half a caller may name alone."""
+    address = worker.address
+    devices = worker.query_devices()
+
+    named = 0
+    for device in devices:
         try:
             ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
-                worker, address, True, None, entry["index"]
+                worker, address, True, device["name"]
             )
         except UCXError:
             continue
         worker.progress()
-
-        # Loopback decides no reachability, so the verdict reachable here is that
-        # the pin was accepted and lanes were still selected. Which port carries
-        # bytes is the two-pod harness's answer.
         assert ep.transports
-        pinned += 1
+        named += 1
 
-    assert pinned > 0
-
-
-def test_remote_device_pin_rejects_unknown_index(worker):
-    address = worker.address
-    unknown = max(entry["index"] for entry in worker.query_address_devices(address)) + 1
-
-    with pytest.raises(UCXNoDeviceError):
-        ucx_api.UCXEndpoint.create_from_worker_address_with_device(
-            worker, address, True, None, unknown
-        )
+    assert named > 0

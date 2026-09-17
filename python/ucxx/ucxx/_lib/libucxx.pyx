@@ -913,7 +913,7 @@ cdef class UCXWorker():
         """Devices a peer's worker address advertises.
 
         One dict per address entry, in advertised order. ``index`` is what
-        ``remote_device`` takes when creating an endpoint to *this* address, and
+        ``remote_device_index`` takes when creating an endpoint to *this* address, and
         means nothing for any other. ``reachable_from_local`` is a bitmap over
         ``query_devices()`` indices, so it is a fact about this worker.
         """
@@ -991,10 +991,12 @@ cdef class UCXWorker():
             UCXAddress address,
             bint endpoint_error_handling,
             local_device,
-            remote_device=None
+            remote_device_index=None,
+            local_device_index=None
     ) -> UCXEndpoint:
         return UCXEndpoint.create_from_worker_address_with_device(
-            self, address, endpoint_error_handling, local_device, remote_device
+            self, address, endpoint_error_handling, local_device,
+            remote_device_index, local_device_index
         )
 
     def init_blocking_progress_mode(self) -> None:
@@ -1853,15 +1855,19 @@ cdef class UCXEndpoint():
             UCXAddress address,
             bint endpoint_error_handling,
             local_device,
-            remote_device=None
+            remote_device_index=None,
+            local_device_index=None
     ) -> UCXEndpoint:
-        """Create an endpoint pinned to one device at each end.
+        """Create an endpoint pinned to one local device, or to one whole path.
 
         Separate from create_from_worker_address so the existing entry point,
-        and the C++ symbol behind it, are left untouched. ``remote_device`` is an
-        ``index`` from ``UCXWorker.query_address_devices(address)`` for this same
-        address; an index that address does not carry fails endpoint creation
-        rather than falling back to another device.
+        and the C++ symbol behind it, are left untouched. Passing both
+        ``local_device_index`` and ``remote_device_index`` names the whole path
+        and every lane is selected on that pair; passing neither names this end
+        alone, by ``local_device``, and lane selection picks the peer's device
+        as it always did. The remote index comes from
+        ``UCXWorker.query_address_devices(address)`` over this same address and
+        is valid for it alone.
         """
         cdef UCXEndpoint endpoint = UCXEndpoint.__new__(UCXEndpoint)
         cdef shared_ptr[Context] ucxx_context
@@ -1870,8 +1876,15 @@ cdef class UCXEndpoint():
         cdef string ucxx_local_device = (
             local_device.encode("utf-8") if local_device else b""
         )
-        cdef bint pin_remote = remote_device is not None
-        cdef unsigned int ucxx_remote_device = remote_device if pin_remote else 0
+        cdef bint on_path = (
+            remote_device_index is not None and local_device_index is not None
+        )
+        cdef unsigned int ucxx_remote_index = (
+            remote_device_index if remote_device_index is not None else 0
+        )
+        cdef unsigned int ucxx_local_index = (
+            local_device_index if local_device_index is not None else 0
+        )
 
         endpoint._enable_python_future = worker.enable_python_future
 
@@ -1882,21 +1895,19 @@ cdef class UCXEndpoint():
 
             endpoint._context_feature_flags = ucxx_context.get().getFeatureFlags()
             endpoint._cuda_support = ucxx_context.get().hasCudaSupport()
-            # Two call sites for one C++ method: Cython cannot spell an
-            # `optional[unsigned]` argument, so the overload is selected by the
-            # type passed, as `am_send` does with its callback info.
-            if pin_remote:
+            # Two C++ entry points, one per shape: a whole path, or this end
+            # alone. There is none that takes half a path.
+            if on_path:
                 endpoint._endpoint = (
-                    worker._worker.get().createEndpointFromWorkerAddressWithDevice(
-                        ucxx_address, endpoint_error_handling, ucxx_local_device,
-                        ucxx_remote_device
+                    worker._worker.get().createEndpointFromWorkerAddressOnPath(
+                        ucxx_address, endpoint_error_handling, ucxx_local_index,
+                        ucxx_remote_index
                     )
                 )
             else:
                 endpoint._endpoint = (
                     worker._worker.get().createEndpointFromWorkerAddressWithDevice(
-                        ucxx_address, endpoint_error_handling, ucxx_local_device,
-                        nullopt
+                        ucxx_address, endpoint_error_handling, ucxx_local_device
                     )
                 )
 
@@ -1942,7 +1953,7 @@ cdef class UCXEndpoint():
         """``(transport, device)`` for each lane this endpoint selected.
 
         What UCX chose, not what was asked for: an endpoint created with a
-        ``local_device`` or ``remote_device`` is only known to have honoured it
+        a ``local_device`` or a path is only known to have honoured it
         by reading it back from here.
         """
         cdef vector[TransportEntry] entries

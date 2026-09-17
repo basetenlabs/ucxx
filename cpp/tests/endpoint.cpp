@@ -77,24 +77,24 @@ TEST_F(EndpointTest, GetTransports)
 //   wireup.c:412  Assertion `ep_addr_index < address->num_ep_addrs' failed:
 //   lane=2/5 tl_name_csum=0xd47a address_index=0 ep_addr_index=1 num_ep_addrs=1
 // Confining lane selection to one remote device puts several p2p lanes on one
-// address entry, and an entry carries one ep address per lane that selection
-// would normally have spread across entries. Re-enable when A1 answers it.
-TEST_F(EndpointTest, DISABLED_RemoteDevicePinIsHonoured)
+TEST_F(EndpointTest, PathIsHonoured)
 {
   auto address = _remoteWorker->getAddress();
   auto entries = _worker->queryAddressDevices(address);
+  auto devices = _worker->queryDevices();
   ASSERT_FALSE(entries.empty());
+  ASSERT_FALSE(devices.empty());
 
   // Every advertised device is tried, because not all of them can carry this
   // connection: an address advertises `self/memory` too, and restricting an
   // endpoint between two workers to it leaves no usable transport, which UCX
   // reports as unreachable rather than falling back to another device.
-  size_t pinned = 0;
+  size_t on_path = 0;
   for (const auto& entry : entries) {
     std::shared_ptr<ucxx::Endpoint> ep;
     try {
-      ep = _worker->createEndpointFromWorkerAddressWithDevice(
-        address, true, std::string(), entry.index);
+      ep = _worker->createEndpointFromWorkerAddressOnPath(
+        address, true, devices[0].index, entry.index);
     } catch (const ucxx::Error&) {
       continue;
     }
@@ -105,23 +105,25 @@ TEST_F(EndpointTest, DISABLED_RemoteDevicePinIsHonoured)
     // that the pin was accepted and lanes were still selected; that the bytes
     // leave by the named port is the two-pod harness's to answer.
     EXPECT_FALSE(ep->getTransports().empty());
-    ++pinned;
+    ++on_path;
   }
-  EXPECT_GT(pinned, 0u);
+  EXPECT_GT(on_path, 0u);
 }
 
-TEST_F(EndpointTest, RemoteDevicePinRejectsUnknownIndex)
+TEST_F(EndpointTest, PathRejectsUnknownPeerIndex)
 {
   auto address = _remoteWorker->getAddress();
   auto entries = _worker->queryAddressDevices(address);
+  auto devices = _worker->queryDevices();
   ASSERT_FALSE(entries.empty());
+  ASSERT_FALSE(devices.empty());
 
   unsigned unknown = 0;
   for (const auto& entry : entries)
     unknown = std::max(unknown, entry.index + 1);
 
-  EXPECT_THROW(std::ignore = _worker->createEndpointFromWorkerAddressWithDevice(
-                 address, true, std::string(), unknown),
+  EXPECT_THROW(std::ignore = _worker->createEndpointFromWorkerAddressOnPath(
+                 address, true, devices[0].index, unknown),
                ucxx::Error);
 }
 

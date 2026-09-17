@@ -310,16 +310,13 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         shared_ptr[Endpoint] createEndpointFromWorkerAddress(
             shared_ptr[Address] address, bint endpoint_error_handling
         ) except +raise_py_error
-        # Same C++ method, twice: `nullopt_t` and a bare `unsigned int` both
-        # convert implicitly to the `optional[unsigned]` parameter that Cython
-        # cannot spell, as with `amSend` above.
         shared_ptr[Endpoint] createEndpointFromWorkerAddressWithDevice(
             shared_ptr[Address] address, bint endpoint_error_handling,
-            const string& local_device, nullopt_t remote_device
+            const string& local_device
         ) except +raise_py_error
-        shared_ptr[Endpoint] createEndpointFromWorkerAddressWithDevice(
+        shared_ptr[Endpoint] createEndpointFromWorkerAddressOnPath(
             shared_ptr[Address] address, bint endpoint_error_handling,
-            const string& local_device, unsigned int remote_device
+            unsigned int local_device_index, unsigned int remote_device_index
         ) except +raise_py_error
         shared_ptr[Listener] createListener(
             uint16_t port, ucp_listener_conn_callback_t callback, void *callback_args

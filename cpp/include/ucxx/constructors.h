@@ -59,17 +59,30 @@ class Worker;
 
 /**
  * Like createEndpointFromWorkerAddress, but restricts the endpoint's lanes to one
- * local device (e.g. "mlx5_bond_0:1"), one peer device, or both. A separate entry
- * point rather than extra parameters on createEndpointFromWorkerAddress, so that
- * symbol and its ABI stay intact. `remoteDevice` is a `RemoteDeviceAttr::index`
- * from `Worker::queryAddressDevices(address)`, for the same `address`.
+ * local device (e.g. "mlx5_bond_0:1"). A separate entry point rather than extra
+ * parameters on createEndpointFromWorkerAddress, so that symbol and its ABI stay
+ * intact. The peer's device is left to lane selection; name both ends with
+ * createEndpointFromWorkerAddressOnPath instead.
  */
 [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
   std::shared_ptr<Worker> worker,
   std::shared_ptr<Address> address,
   bool endpointErrorHandling,
-  const std::string& localDevice,
-  std::optional<unsigned> remoteDevice = std::nullopt);
+  const std::string& localDevice);
+
+/**
+ * Create an endpoint on one path: both ends, neither optional. Every lane is
+ * selected on that pair and the creation fails where the pair affords none.
+ * `localDeviceIndex` is a `DeviceAttr::index` from `Worker::queryDevices()`;
+ * `remoteDeviceIndex` a `RemoteDeviceAttr::index` from
+ * `Worker::queryAddressDevices(address)` over the same `address`.
+ */
+[[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  unsigned localDeviceIndex,
+  unsigned remoteDeviceIndex);
 
 [[nodiscard]] std::shared_ptr<Listener> createListener(std::shared_ptr<Worker> worker,
                                                        uint16_t port,

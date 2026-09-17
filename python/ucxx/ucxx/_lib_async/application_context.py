@@ -218,7 +218,7 @@ class ApplicationContext:
     def query_address_devices(self, address):
         """Devices a peer's worker address advertises.
 
-        One dict per address entry. ``index`` is what ``remote_device`` takes for
+        One dict per address entry. ``index`` is what ``remote_device_index`` takes for
         this same address, and ``reachable_from_local`` is a bitmap over this
         worker's ``query_devices()`` indices.
         """
@@ -507,9 +507,8 @@ class ApplicationContext:
         *,
         endpoint_error_handling=True,
         local_device=None,
-        remote_device=None,
     ):
-        """Create an endpoint pinned to one device at each end.
+        """Create an endpoint pinned to one local device, this end only.
 
         Keyword-only past `address`: the device used to be the second positional
         parameter in callers' minds, which silently bound it to
@@ -520,13 +519,6 @@ class ApplicationContext:
         address: UCXAddress
         endpoint_error_handling: boolean, optional
             As in `create_endpoint_from_worker_address`.
-        remote_device: int, optional
-            `index` of a peer device, from `query_address_devices(address)` for
-            this same address. Restricts this endpoint's lanes to that peer
-            device; together with `local_device` it names both ends of the path,
-            which is what places two endpoints between one pair of workers on
-            disjoint paths. An index the address does not carry fails endpoint
-            creation rather than falling back to another device.
         local_device: str, optional
             Name of the local device to restrict this endpoint's lanes to, e.g.
             "mlx5_bond_0:1". Unlike UCX_NET_DEVICES, which is fixed at context
@@ -548,7 +540,6 @@ class ApplicationContext:
             address,
             endpoint_error_handling,
             local_device,
-            remote_device,
         )
         if not self.progress_mode.startswith("thread"):
             self.worker.progress()
@@ -557,8 +548,66 @@ class ApplicationContext:
 
         logger.debug(
             "create_endpoint_with_device() client: %s, error handling: %s, "
-            "local device: %s, remote device: %s"
-            % (hex(ep._ep.handle), endpoint_error_handling, local_device, remote_device)
+            "local device: %s"
+            % (hex(ep._ep.handle), endpoint_error_handling, local_device)
+        )
+
+        return ep
+
+    async def create_endpoint_from_worker_address_on_path(
+        self,
+        address,
+        local_device_index,
+        remote_device_index,
+        *,
+        endpoint_error_handling=True,
+    ):
+        """Create an endpoint on one path: both ends, neither optional.
+
+        Every lane of the endpoint is selected on that pair of devices, and
+        creation fails where the pair affords none rather than selecting
+        elsewhere.
+
+        Parameters
+        ----------
+        address: UCXAddress
+        local_device_index: int
+            `index` of a local device, from `get_worker_devices()`.
+        remote_device_index: int
+            `index` of a peer device, from `query_address_devices(address)` over
+            this same address, and valid for that address alone.
+        endpoint_error_handling: boolean, optional
+            As in `create_endpoint_from_worker_address`.
+
+        Returns
+        -------
+        Endpoint
+            The new endpoint
+        """
+        self.continuous_ucx_progress()
+
+        ucx_ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+            self.worker,
+            address,
+            endpoint_error_handling,
+            None,
+            remote_device_index=remote_device_index,
+            local_device_index=local_device_index,
+        )
+        if not self.progress_mode.startswith("thread"):
+            self.worker.progress()
+
+        ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
+
+        logger.debug(
+            "create_endpoint_on_path() client: %s, error handling: %s, "
+            "path: local device[%s] -> remote device[%s]"
+            % (
+                hex(ep._ep.handle),
+                endpoint_error_handling,
+                local_device_index,
+                remote_device_index,
+            )
         )
 
         return ep

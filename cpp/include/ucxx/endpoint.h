@@ -218,8 +218,31 @@ class Endpoint : public Component {
     std::shared_ptr<Worker> worker,
     std::shared_ptr<Address> address,
     bool endpointErrorHandling,
-    const std::string& localDevice,
-    std::optional<unsigned> remoteDevice);
+    const std::string& localDevice);
+
+  /**
+   * @brief Create an endpoint on one path: both ends, neither optional.
+   *
+   * Every lane of the endpoint is selected on that pair of devices, and where
+   * the pair affords none the creation fails rather than selecting elsewhere.
+   * `localDeviceIndex` is a `dev_index` from the worker's device query;
+   * `remoteDeviceIndex` is one from the address query over `address` itself,
+   * and is valid inside that blob alone.
+   *
+   * @param[in] worker                parent worker from which to create the endpoint.
+   * @param[in] address               address of the remote UCX worker
+   * @param[in] endpointErrorHandling whether to enable endpoint error handling.
+   * @param[in] localDeviceIndex      local end of the path
+   * @param[in] remoteDeviceIndex     peer end of the path, within `address`
+   *
+   * @returns The `shared_ptr<ucxx::Endpoint>` object
+   */
+  friend std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+    std::shared_ptr<Worker> worker,
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    unsigned localDeviceIndex,
+    unsigned remoteDeviceIndex);
 
   /**
    * @brief Get the underlying `ucp_ep_h` handle.

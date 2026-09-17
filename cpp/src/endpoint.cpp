@@ -254,8 +254,7 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
   std::shared_ptr<Worker> worker,
   std::shared_ptr<Address> address,
   bool endpointErrorHandling,
-  const std::string& localDevice,
-  std::optional<unsigned> remoteDevice)
+  const std::string& localDevice)
 {
   if (worker == nullptr || worker->getHandle() == nullptr)
     throw ucxx::Error("Worker not initialized");
@@ -278,14 +277,35 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
     params.local_device = localDevice.c_str();
   }
 
-  // The peer end of the same path. `remoteDevice` indexes the entries of the
-  // address in `params.address` and nothing else, so an index from another
-  // address names a different device or none at all; UCX fails endpoint creation
-  // with UCS_ERR_NO_DEVICE in the latter case rather than picking another.
-  if (remoteDevice.has_value()) {
-    params.field_mask |= UCP_EP_PARAM_FIELD_REMOTE_DEVICE;
-    params.remote_device = *remoteDevice;
-  }
+  auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
+  ep->create(&params);
+  return ep;
+}
+
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  unsigned localDeviceIndex,
+  unsigned remoteDeviceIndex)
+{
+  if (worker == nullptr || worker->getHandle() == nullptr)
+    throw ucxx::Error("Worker not initialized");
+  if (address == nullptr || address->getHandle() == nullptr || address->getLength() == 0)
+    throw ucxx::Error("Address not initialized");
+
+  // Both ends in one field, because they are one decision: UCX selects every
+  // lane on that pair and fails the creation where the pair affords none,
+  // instead of choosing a device the caller did not name. `remoteDeviceIndex`
+  // indexes the entries of the address in `params.address` and nothing else, so
+  // an index from another address names a different device or none at all.
+  ucp_ep_params_t params = {.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS |
+                                          UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                                          UCP_EP_PARAM_FIELD_ERR_HANDLER |
+                                          UCP_EP_PARAM_FIELD_PATH,
+                            .address = address->getHandle()};
+  params.path.local_dev_index  = localDeviceIndex;
+  params.path.remote_dev_index = remoteDeviceIndex;
 
   auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
   ep->create(&params);
@@ -301,7 +321,7 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker
   // consumer of libucxx.so, including the installed Cython extension. A separate
   // entry point leaves the existing ABI untouched.
   return createEndpointFromWorkerAddressWithDevice(
-    worker, address, endpointErrorHandling, std::string(), std::nullopt);
+    worker, address, endpointErrorHandling, std::string());
 }
 
 Endpoint::~Endpoint()

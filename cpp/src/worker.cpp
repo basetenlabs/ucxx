@@ -810,12 +810,23 @@ std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddress(std::shared_pt
 std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddressWithDevice(
   std::shared_ptr<Address> address,
   bool endpointErrorHandling,
-  const std::string& localDevice,
-  std::optional<unsigned> remoteDevice)
+  const std::string& localDevice)
 {
   auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
   auto endpoint = ucxx::createEndpointFromWorkerAddressWithDevice(
-    worker, address, endpointErrorHandling, localDevice, remoteDevice);
+    worker, address, endpointErrorHandling, localDevice);
+  return endpoint;
+}
+
+std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddressOnPath(
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  unsigned localDeviceIndex,
+  unsigned remoteDeviceIndex)
+{
+  auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
+  auto endpoint = ucxx::createEndpointFromWorkerAddressOnPath(
+    worker, address, endpointErrorHandling, localDeviceIndex, remoteDeviceIndex);
   return endpoint;
 }
 

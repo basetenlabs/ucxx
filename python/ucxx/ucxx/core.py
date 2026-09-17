@@ -207,12 +207,12 @@ async def create_endpoint_from_worker_address_with_device(
     *,
     endpoint_error_handling=True,
     local_device=None,
-    remote_device=None,
 ):
-    """Create an endpoint pinned to one local device, one peer device, or both.
+    """Create an endpoint pinned to one local device, this end only.
 
-    `local_device` is a name from `get_worker_devices()`; `remote_device` is an
-    `index` from `get_address_devices(address)` for this same address.
+    `local_device` is a name from `get_worker_devices()`. The peer's device is
+    left to lane selection; name both ends with
+    `create_endpoint_from_worker_address_on_path` instead.
 
     Keyword-only past `address` on purpose: a caller passing the device as the
     second positional argument bound it to `endpoint_error_handling`, which is
@@ -222,7 +222,28 @@ async def create_endpoint_from_worker_address_with_device(
         address,
         endpoint_error_handling=endpoint_error_handling,
         local_device=local_device,
-        remote_device=remote_device,
+    )
+
+
+async def create_endpoint_from_worker_address_on_path(
+    address,
+    local_device_index,
+    remote_device_index,
+    *,
+    endpoint_error_handling=True,
+):
+    """Create an endpoint on one path: both ends, neither optional.
+
+    `local_device_index` is an `index` from `get_worker_devices()`;
+    `remote_device_index` one from `get_address_devices(address)` over this same
+    address, valid for that address alone. Every lane is selected on that pair,
+    and creation fails where the pair affords none.
+    """
+    return await _get_ctx().create_endpoint_from_worker_address_on_path(
+        address,
+        local_device_index,
+        remote_device_index,
+        endpoint_error_handling=endpoint_error_handling,
     )
 
 
@@ -287,7 +308,7 @@ def get_worker_devices():
 def get_address_devices(address):
     """Devices a peer's worker address advertises, in advertised order.
 
-    ``index`` is what `remote_device` takes for this same address and means
+    ``index`` is what `remote_device_index` takes for this same address and means
     nothing for any other; ``reachable_from_local`` is a bitmap over this
     worker's `get_worker_devices()` indices.
     """
@@ -334,6 +355,7 @@ __all__ = [
     "create_endpoint",
     "create_endpoint_from_worker_address",
     "create_endpoint_from_worker_address_with_device",
+    "create_endpoint_from_worker_address_on_path",
     "get_ucp_context_info",
     "get_ucp_worker_info",
     "get_active_transports",
