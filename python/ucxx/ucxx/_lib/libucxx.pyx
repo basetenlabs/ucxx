@@ -939,6 +939,28 @@ cdef class UCXWorker():
             })
         return result
 
+    def query_endpoint_transports(self, uintptr_t ucp_endpoint) -> list:
+        """``(transport, device)`` for each lane of any endpoint on this worker.
+
+        Takes a raw ``ucp_ep_h``, so it reaches the endpoint a peer's wireup
+        built, which ucxx never created and therefore has no ``UCXEndpoint``
+        for. That endpoint carries the peer's replies and anything it pulls, so
+        reading it back is how the port a request was answered on is observed
+        rather than assumed.
+        """
+        cdef vector[TransportEntry] entries
+
+        with nogil:
+            entries = self._worker.get().queryEndpointTransports(ucp_endpoint)
+
+        return [
+            (
+                entries[i].transport.decode("utf-8"),
+                entries[i].device.decode("utf-8"),
+            )
+            for i in range(entries.size())
+        ]
+
     @property
     def enable_delayed_submission(self) -> bool:
         return self._enable_delayed_submission

@@ -936,6 +936,23 @@ class Worker : public Component {
   [[nodiscard]] std::vector<RemoteDeviceAttr> queryAddressDevices(std::shared_ptr<Address> address);
 
   /**
+   * @brief Report the transports an endpoint on this worker selected.
+   *
+   * On this worker rather than on `Endpoint` because the endpoint a peer's
+   * wireup built is not one ucxx created: it exists only as a `ucp_ep_h` on
+   * this worker, and that handle is meaningful against no other worker. Reading
+   * it back is the only way to learn which port a peer's request was answered
+   * on.
+   *
+   * @param[in] ucpEndpointHandle a `ucp_ep_h` belonging to this worker.
+   *
+   * @throws ucxx::Error if the endpoint cannot be queried.
+   *
+   * @returns One `TransportEntry` per lane, in UCX's own order.
+   */
+  [[nodiscard]] std::vector<TransportEntry> queryEndpointTransports(uintptr_t ucpEndpointHandle);
+
+  /**
    * @brief Create endpoint to worker listening on specific IP and port.
    *
    * Creates an endpoint to a remote worker listening on a specific IP address and port.

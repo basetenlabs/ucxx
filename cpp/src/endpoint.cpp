@@ -458,36 +458,7 @@ ucp_ep_h Endpoint::getHandle() { return _handle; }
 
 std::vector<TransportEntry> Endpoint::getTransports()
 {
-  // ucp_ep_query truncates to the array it is handed and reports only how many
-  // entries it filled, so a full array may mean there are more lanes. The bound
-  // it stops at, UCP_MAX_LANES, is not in the public API, so grow until a call
-  // comes back short. `entry_size` is what keeps UCX from writing fields past
-  // the end of the struct this was compiled against.
-  std::vector<ucp_transport_entry_t> raw(8);
-  unsigned filled = 0;
-  for (;;) {
-    ucp_ep_attr_t attr;
-    attr.field_mask             = UCP_EP_ATTR_FIELD_TRANSPORTS;
-    attr.transports.entries     = raw.data();
-    attr.transports.num_entries = static_cast<unsigned>(raw.size());
-    attr.transports.entry_size  = sizeof(ucp_transport_entry_t);
-    utils::ucsErrorThrow(ucp_ep_query(_handle, &attr));
-
-    filled = attr.transports.num_entries;
-    if (filled < raw.size()) break;
-    raw.resize(raw.size() * 2);
-  }
-  raw.resize(filled);
-
-  std::vector<TransportEntry> transports;
-  transports.reserve(raw.size());
-  for (const auto& entry : raw) {
-    TransportEntry transport;
-    if (entry.transport_name != nullptr) transport.transport = entry.transport_name;
-    if (entry.device_name != nullptr) transport.device = entry.device_name;
-    transports.push_back(std::move(transport));
-  }
-  return transports;
+  return getWorker()->queryEndpointTransports(reinterpret_cast<uintptr_t>(_handle));
 }
 
 bool Endpoint::isAlive() const

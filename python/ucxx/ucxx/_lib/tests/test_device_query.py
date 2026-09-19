@@ -87,6 +87,21 @@ def test_endpoint_transports(worker):
     assert all(transport for transport, _device in transports)
 
 
+def test_query_endpoint_transports_by_handle(worker):
+    # b10 holds the endpoint a peer's wireup built only as a raw ucp_ep_h, and
+    # there is no way to make one here, so what this pins down is that the
+    # handle route answers what the owning endpoint answers.
+    ep = ucx_api.UCXEndpoint.create_from_worker_address(worker, worker.address, True)
+    worker.progress()
+
+    assert worker.query_endpoint_transports(ep.handle) == ep.transports
+
+
+def test_query_endpoint_transports_rejects_a_null_handle(worker):
+    with pytest.raises(UCXError):
+        worker.query_endpoint_transports(0)
+
+
 def test_a_path_is_honoured(worker):
     address = worker.address
     entries = worker.query_address_devices(address)

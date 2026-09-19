@@ -4,7 +4,7 @@
 
 from posix cimport fcntl
 
-from libc.stdint cimport int64_t, uint8_t, uint16_t, uint64_t
+from libc.stdint cimport int64_t, uint8_t, uint16_t, uint64_t, uintptr_t
 from libcpp cimport bool as cpp_bool
 from libcpp.functional cimport function
 from libcpp.memory cimport shared_ptr, unique_ptr
@@ -302,6 +302,9 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         vector[DeviceAttr] queryDevices() except +raise_py_error
         vector[RemoteDeviceAttr] queryAddressDevices(
             shared_ptr[Address] address
+        ) except +raise_py_error
+        vector[TransportEntry] queryEndpointTransports(
+            uintptr_t ucp_endpoint_handle
         ) except +raise_py_error
         void excludeDevice(const string& device_name) except +raise_py_error
         shared_ptr[Endpoint] createEndpointFromHostname(

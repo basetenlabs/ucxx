@@ -315,6 +315,17 @@ def get_address_devices(address):
     return _get_ctx().query_address_devices(address)
 
 
+def get_endpoint_transports(ucp_endpoint):
+    """``(transport, device)`` for each lane of an endpoint on this worker.
+
+    Takes a raw ``ucp_ep_h`` as a Python integer, which is the only form the
+    endpoint a peer's wireup built is held in: ucxx never created it, so it has
+    no `Endpoint` object. That endpoint carries the peer's replies and anything
+    it pulls, so this is how the port a request was answered on is observed.
+    """
+    return _get_ctx().query_endpoint_transports(ucp_endpoint)
+
+
 def register_am_receiver_callback(owner, identifier, cb_func):
     return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
 
@@ -366,6 +377,7 @@ __all__ = [
     "get_worker_address_with_devices",
     "get_worker_devices",
     "get_address_devices",
+    "get_endpoint_transports",
     "exclude_device",
     "get_ucx_address_from_buffer",
     "recv",

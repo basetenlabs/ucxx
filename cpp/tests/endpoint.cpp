@@ -72,6 +72,31 @@ TEST_F(EndpointTest, GetTransports)
     EXPECT_FALSE(transport.transport.empty());
 }
 
+TEST_F(EndpointTest, QueryTransportsByHandle)
+{
+  // The reading b10 needs for an endpoint it holds only as a `ucp_ep_h`: the
+  // one a peer's wireup built, which ucxx never created. Nothing here can
+  // produce such an endpoint, so what is checked is that the handle route
+  // answers what the owning endpoint answers.
+  auto ep = _worker->createEndpointFromWorkerAddress(_worker->getAddress());
+  _worker->progress();
+
+  auto byHandle =
+    _worker->queryEndpointTransports(reinterpret_cast<uintptr_t>(ep->getHandle()));
+  auto byEndpoint = ep->getTransports();
+
+  ASSERT_EQ(byEndpoint.size(), byHandle.size());
+  for (size_t i = 0; i < byHandle.size(); ++i) {
+    EXPECT_EQ(byEndpoint[i].transport, byHandle[i].transport);
+    EXPECT_EQ(byEndpoint[i].device, byHandle[i].device);
+  }
+}
+
+TEST_F(EndpointTest, QueryTransportsRejectsNullHandle)
+{
+  EXPECT_THROW(_worker->queryEndpointTransports(0), ucxx::Error);
+}
+
 // Disabled, not deleted: this aborts the whole binary inside UCX, on A1's
 // restricted path and not in any code here --
 //   wireup.c:412  Assertion `ep_addr_index < address->num_ep_addrs' failed:

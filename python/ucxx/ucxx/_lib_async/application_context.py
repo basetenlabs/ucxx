@@ -224,6 +224,14 @@ class ApplicationContext:
         """
         return self.worker.query_address_devices(address)
 
+    def query_endpoint_transports(self, ucp_endpoint):
+        """``(transport, device)`` for each lane of an endpoint on this worker.
+
+        Takes a raw ``ucp_ep_h``, so it reaches the endpoint a peer's wireup
+        built, which ucxx never created and has no ``Endpoint`` object for.
+        """
+        return self.worker.query_endpoint_transports(ucp_endpoint)
+
     def worker_address_with_devices(self, device_names):
         """Worker address listing only ``device_names``.
 
