@@ -248,9 +248,11 @@ std::shared_ptr<Endpoint> createEndpointFromConnRequest(std::shared_ptr<Listener
   return ep;
 }
 
-std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker> worker,
-                                                          std::shared_ptr<Address> address,
-                                                          bool endpointErrorHandling)
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  const std::string& localDevice)
 {
   if (worker == nullptr || worker->getHandle() == nullptr)
     throw ucxx::Error("Worker not initialized");
@@ -262,9 +264,32 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker
                                           UCP_EP_PARAM_FIELD_ERR_HANDLER,
                             .address = address->getHandle()};
 
+  // Pin this endpoint's lanes to one local device when asked. UCX_NET_DEVICES
+  // cannot express this: it is read once at context creation, so it constrains
+  // every endpoint on the worker identically. Per-endpoint pinning is what lets
+  // a caller attribute a transport failure to a specific NIC and rebuild on a
+  // different one. An unknown device name makes ucp_ep_create fail rather than
+  // silently pick another device.
+  if (!localDevice.empty()) {
+    params.field_mask |= UCP_EP_PARAM_FIELD_LOCAL_DEVICE;
+    params.local_device = localDevice.c_str();
+  }
+
   auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
   ep->create(&params);
   return ep;
+}
+
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker> worker,
+                                                          std::shared_ptr<Address> address,
+                                                          bool endpointErrorHandling)
+{
+  // Kept as a distinct symbol on purpose: adding a parameter here -- even a
+  // defaulted one -- changes the C++ mangled name and breaks every already-built
+  // consumer of libucxx.so, including the installed Cython extension. A separate
+  // entry point leaves the existing ABI untouched.
+  return createEndpointFromWorkerAddressWithDevice(
+    worker, address, endpointErrorHandling, std::string());
 }
 
 Endpoint::~Endpoint()

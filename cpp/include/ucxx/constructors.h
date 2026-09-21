@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <ucxx/buffer.h>
 #include <ucxx/component.h>
@@ -36,6 +37,9 @@ class Worker;
 // Components
 [[nodiscard]] std::shared_ptr<Address> createAddressFromWorker(std::shared_ptr<Worker> worker);
 
+[[nodiscard]] std::shared_ptr<Address> createAddressFromWorkerWithDevices(
+  std::shared_ptr<Worker> worker, const std::vector<std::string>& deviceNames);
+
 [[nodiscard]] std::shared_ptr<Address> createAddressFromString(std::string_view addressString);
 
 [[nodiscard]] std::shared_ptr<Context> createContext(const ConfigMap ucxConfig,
@@ -51,6 +55,17 @@ class Worker;
 
 [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(
   std::shared_ptr<Worker> worker, std::shared_ptr<Address> address, bool endpointErrorHandling);
+
+/**
+ * Like createEndpointFromWorkerAddress, but restricts the endpoint's lanes to
+ * one local device (e.g. "mlx5_bond_0:1"). A separate entry point rather than an
+ * extra parameter, so the existing symbol and its ABI stay intact.
+ */
+[[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  const std::string& localDevice);
 
 [[nodiscard]] std::shared_ptr<Listener> createListener(std::shared_ptr<Worker> worker,
                                                        uint16_t port,

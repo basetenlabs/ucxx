@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <ucp/api/ucp.h>
 
@@ -65,6 +66,16 @@ class Address : public Component {
    * @returns The `shared_ptr<ucxx::Address>` object.
    */
   friend std::shared_ptr<Address> createAddressFromWorker(std::shared_ptr<Worker> worker);
+
+  /**
+   * @brief Constructor of `std::shared_ptr<ucxx::Address>` from a worker,
+   *        restricted to the given local devices.
+   *
+   * Same construction as `createAddressFromWorker()`, so it needs the same
+   * access to the private constructor.
+   */
+  friend std::shared_ptr<Address> createAddressFromWorkerWithDevices(
+    std::shared_ptr<Worker> worker, const std::vector<std::string>& deviceNames);
 
   /**
    * @brief Constructor for `shared_ptr<ucxx::Address>` from string.

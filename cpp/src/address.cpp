@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <ucxx/address.h>
 #include <ucxx/utils/ucx.h>
@@ -37,6 +38,28 @@ std::shared_ptr<Address> createAddressFromWorker(std::shared_ptr<Worker> worker)
   size_t length = 0;
 
   utils::ucsErrorThrow(ucp_worker_get_address(ucp_worker, &address, &length));
+  return std::shared_ptr<Address>(new Address(worker, address, length));
+}
+
+std::shared_ptr<Address> createAddressFromWorkerWithDevices(
+  std::shared_ptr<Worker> worker, const std::vector<std::string>& deviceNames)
+{
+  if (deviceNames.empty())
+    throw std::invalid_argument("At least one device name must be given");
+
+  // A separate entry point rather than a defaulted argument on
+  // createAddressFromWorker: adding a parameter there would change its mangled
+  // name and break every already-built consumer of libucxx.so.
+  std::vector<const char*> names;
+  names.reserve(deviceNames.size());
+  for (const auto& name : deviceNames) names.push_back(name.c_str());
+
+  ucp_worker_h ucp_worker = worker->getHandle();
+  ucp_address_t* address{nullptr};
+  size_t length = 0;
+
+  utils::ucsErrorThrow(ucp_worker_get_address_with_devices(
+    ucp_worker, names.data(), static_cast<unsigned>(names.size()), &address, &length));
   return std::shared_ptr<Address>(new Address(worker, address, length));
 }
 
