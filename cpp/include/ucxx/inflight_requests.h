@@ -127,6 +127,16 @@ class InflightRequests {
    * @returns The count of requests that are in process of cancelation.
    */
   [[nodiscard]] size_t getCancelingSize();
+
+  /**
+   * @brief Get the canceling-requests count without pruning.
+   *
+   * Unlike `getCancelingSize()`, does not query request statuses or erase
+   * completed entries; it only reads the container size.
+   *
+   * @returns the number of requests in the canceling set.
+   */
+  [[nodiscard]] size_t cancelingSize();
 };
 
 }  // namespace ucxx

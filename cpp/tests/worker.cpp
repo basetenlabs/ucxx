@@ -56,6 +56,67 @@ class WorkerTest : public ::testing::Test {
   }
 };
 
+class WorkerCancelParkTest : public ::testing::Test {
+ protected:
+  std::shared_ptr<ucxx::Context> _context{
+    ucxx::createContext({}, ucxx::Context::defaultFeatureFlags)};
+  std::shared_ptr<ucxx::Context> _remoteContext{
+    ucxx::createContext({}, ucxx::Context::defaultFeatureFlags)};
+  std::shared_ptr<ucxx::Worker> _worker{nullptr};
+  std::shared_ptr<ucxx::Worker> _remoteWorker{nullptr};
+
+  virtual void SetUp()
+  {
+    _worker       = _context->createWorker();
+    _remoteWorker = _remoteContext->createWorker();
+  }
+
+  void progressBoth()
+  {
+    _worker->progress();
+    _remoteWorker->progress();
+  }
+};
+
+TEST_F(WorkerCancelParkTest, ParkedCanceledRequestUnhooksOnCompletion)
+{
+  auto ep = _worker->createEndpointFromWorkerAddress(_remoteWorker->getAddress());
+
+  /* Large enough for rendezvous: the send cannot complete until a matching
+   * receive is posted. */
+  std::vector<int> sendBuf(8 * 1024 * 1024 / sizeof(int), 42);
+  auto sendReq = ep->tagSend(sendBuf.data(), sendBuf.size() * sizeof(int), ucxx::Tag{99});
+  for (int i = 0; i < 100 && !sendReq->isCompleted(); ++i)
+    progressBoth();
+  ASSERT_FALSE(sendReq->isCompleted());
+
+  /* Attempt cancelation: `ucp_request_cancel()` cannot cancel send requests,
+   * so the request must be parked as canceled-but-incomplete. */
+  ucxx::TrackedRequests tracked{};
+  tracked.inflight.push_back(sendReq);
+  _worker->scheduleRequestCancel(std::move(tracked));
+  std::ignore = _worker->cancelInflightRequests(0, 1);
+  EXPECT_EQ(_worker->cancelingRequestsSize(), 1u);
+
+  /* Progress performs no per-iteration work on the parked request: it stays
+   * parked (and in progress) regardless of how often progress runs. */
+  for (int i = 0; i < 100; ++i)
+    progressBoth();
+  EXPECT_FALSE(sendReq->isCompleted());
+  EXPECT_EQ(_worker->cancelingRequestsSize(), 1u);
+
+  /* Completion is what unhooks it: post the matching receive and finish the
+   * transfer, with no further cancelation or pruning calls. */
+  std::vector<int> recvBuf(sendBuf.size());
+  auto recvReq = _remoteWorker->tagRecv(
+    recvBuf.data(), recvBuf.size() * sizeof(int), ucxx::Tag{99}, ucxx::TagMaskFull);
+  while (!sendReq->isCompleted() || !recvReq->isCompleted())
+    progressBoth();
+
+  EXPECT_EQ(_worker->cancelingRequestsSize(), 0u);
+  EXPECT_EQ(recvBuf, sendBuf);
+}
+
 class WorkerCapabilityTest : public ::testing::Test,
                              public ::testing::WithParamInterface<std::tuple<bool, bool>> {
  protected:
@@ -175,6 +236,59 @@ TEST_F(WorkerTest, QueryAttributes)
   EXPECT_GT(attrs.maxAmHeader, 0u);
   EXPECT_FALSE(attrs.name.empty());
   EXPECT_GT(attrs.maxDebugString, 0u);
+}
+
+TEST_F(WorkerTest, QueryDevices)
+{
+  auto devices = _worker->queryDevices();
+
+  ASSERT_FALSE(devices.empty());
+  for (const auto& device : devices) {
+    EXPECT_FALSE(device.name.empty());
+    EXPECT_FALSE(device.transport.empty());
+    // RemoteDeviceAttr::reachableFromLocal is a 64-bit bitmap keyed by this
+    // index, so an index at or past 64 would be dropped from it silently.
+    EXPECT_LT(device.index, 64u);
+  }
+}
+
+TEST_F(WorkerTest, QueryDevicesExcludesRetiredDevice)
+{
+  auto devices = _worker->queryDevices();
+  ASSERT_FALSE(devices.empty());
+  const auto retired = devices.front().name;
+
+  _worker->excludeDevice(retired);
+
+  for (const auto& device : _worker->queryDevices())
+    EXPECT_NE(device.name, retired);
+}
+
+TEST_F(WorkerTest, QueryAddressDevices)
+{
+  auto entries = _worker->queryAddressDevices(_worker->getAddress());
+
+  ASSERT_FALSE(entries.empty());
+
+  // Loopback decides no reachability, so what is checked here is that the two
+  // queries agree: every bit set in a reachability bitmap names a device that
+  // queryDevices() reports. Whether the right bits are set is the two-pod
+  // harness's verdict.
+  uint64_t known = 0;
+  for (const auto& device : _worker->queryDevices())
+    known |= uint64_t{1} << device.index;
+
+  uint64_t reachable = 0;
+  for (const auto& entry : entries) {
+    EXPECT_LT(entry.index, 64u);
+    reachable |= entry.reachableFromLocal;
+  }
+  EXPECT_EQ(reachable & ~known, 0u);
+}
+
+TEST_F(WorkerTest, QueryAddressDevicesRejectsNullAddress)
+{
+  EXPECT_THROW(std::ignore = _worker->queryAddressDevices(nullptr), ucxx::Error);
 }
 
 TEST_P(WorkerCapabilityTest, CheckCapability)

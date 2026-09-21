@@ -202,6 +202,51 @@ async def create_endpoint_from_worker_address(
     )
 
 
+async def create_endpoint_from_worker_address_with_device(
+    address,
+    *,
+    endpoint_error_handling=True,
+    local_device=None,
+):
+    """Create an endpoint pinned to one local device, this end only.
+
+    `local_device` is a name from `get_worker_devices()`. The peer's device is
+    left to lane selection; name both ends with
+    `create_endpoint_from_worker_address_on_path` instead.
+
+    Keyword-only past `address` on purpose: a caller passing the device as the
+    second positional argument bound it to `endpoint_error_handling`, which is
+    truthy, so the endpoint was created unpinned and no error was raised.
+    """
+    return await _get_ctx().create_endpoint_from_worker_address_with_device(
+        address,
+        endpoint_error_handling=endpoint_error_handling,
+        local_device=local_device,
+    )
+
+
+async def create_endpoint_from_worker_address_on_path(
+    address,
+    local_device_index,
+    remote_device_index,
+    *,
+    endpoint_error_handling=True,
+):
+    """Create an endpoint on one path: both ends, neither optional.
+
+    `local_device_index` is an `index` from `get_worker_devices()`;
+    `remote_device_index` one from `get_address_devices(address)` over this same
+    address, valid for that address alone. Every lane is selected on that pair,
+    and creation fails where the pair affords none.
+    """
+    return await _get_ctx().create_endpoint_from_worker_address_on_path(
+        address,
+        local_device_index,
+        remote_device_index,
+        endpoint_error_handling=endpoint_error_handling,
+    )
+
+
 def get_ucp_context_info():
     """Gets information on the current UCX context, obtained from
     `ucp_context_print_info`.
@@ -242,6 +287,53 @@ def get_worker_address():
     return _get_ctx().worker_address
 
 
+def get_worker_address_with_devices(device_names):
+    return _get_ctx().worker_address_with_devices(device_names)
+
+
+def exclude_device(device_name):
+    return _get_ctx().exclude_device(device_name)
+
+
+def get_worker_devices():
+    """Transport resources this process's worker can select lanes from.
+
+    One dict per transport resource, so a device carrying several transports
+    appears once per transport with the same ``index``. ``name`` is the spelling
+    `create_endpoint_from_worker_address_with_device`'s `local_device` takes.
+    """
+    return _get_ctx().query_devices()
+
+
+def get_address_devices(address):
+    """Devices a peer's worker address advertises, in advertised order.
+
+    ``index`` is what `remote_device_index` takes for this same address and means
+    nothing for any other; ``reachable_from_local`` is a bitmap over this
+    worker's `get_worker_devices()` indices.
+    """
+    return _get_ctx().query_address_devices(address)
+
+
+def get_endpoint_transports(ucp_endpoint):
+    """``(transport, device)`` for each lane of an endpoint on this worker.
+
+    Takes a raw ``ucp_ep_h`` as a Python integer, which is the only form the
+    endpoint a peer's wireup built is held in: ucxx never created it, so it has
+    no `Endpoint` object. That endpoint carries the peer's replies and anything
+    it pulls, so this is how the port a request was answered on is observed.
+    """
+    return _get_ctx().query_endpoint_transports(ucp_endpoint)
+
+
+def register_am_receiver_callback(owner, identifier, cb_func):
+    return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
+
+
+def register_am_host_allocator(cb_func):
+    return _get_ctx().register_am_host_allocator(cb_func)
+
+
 def get_ucx_address_from_buffer(buffer):
     return ucx_api.UCXAddress.create_from_buffer(buffer)
 
@@ -251,6 +343,12 @@ async def recv(buffer, tag):
 
 
 # Setting the __doc__
+register_am_receiver_callback.__doc__ = (
+    ApplicationContext.register_am_receiver_callback.__doc__
+)
+register_am_host_allocator.__doc__ = (
+    ApplicationContext.register_am_host_allocator.__doc__
+)
 create_listener.__doc__ = ApplicationContext.create_listener.__doc__
 create_endpoint.__doc__ = ApplicationContext.create_endpoint.__doc__
 continuous_ucx_progress.__doc__ = ApplicationContext.continuous_ucx_progress.__doc__
@@ -267,6 +365,8 @@ __all__ = [
     "create_listener",
     "create_endpoint",
     "create_endpoint_from_worker_address",
+    "create_endpoint_from_worker_address_with_device",
+    "create_endpoint_from_worker_address_on_path",
     "get_ucp_context_info",
     "get_ucp_worker_info",
     "get_active_transports",
@@ -274,6 +374,13 @@ __all__ = [
     "get_ucp_worker",
     "get_ucxx_worker",
     "get_worker_address",
+    "get_worker_address_with_devices",
+    "get_worker_devices",
+    "get_address_devices",
+    "get_endpoint_transports",
+    "exclude_device",
     "get_ucx_address_from_buffer",
     "recv",
+    "register_am_receiver_callback",
+    "register_am_host_allocator",
 ]

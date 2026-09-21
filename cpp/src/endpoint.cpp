@@ -2,7 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES.
  * SPDX-License-Identifier: BSD-3-Clause
  */
+#include <cstdlib>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -60,6 +62,42 @@ struct EndpointErrorCallbackContext {
 
   explicit EndpointErrorCallbackContext(std::shared_ptr<Endpoint> ep) : endpoint(std::move(ep)) {}
 };
+
+/**
+ * Select the UCP error handling mode for an error-handling-enabled endpoint.
+ *
+ * Defaults to `UCP_ERR_HANDLING_MODE_PEER` (a single lane/NIC failure fails the whole
+ * endpoint). When `UCXX_ERROR_HANDLING_MODE=failover` is set in the environment,
+ * worker-address endpoints instead use `UCP_ERR_HANDLING_MODE_FAILOVER`: on a lane
+ * failure UCP runs `ucp_ep_failover_reconfig()`, reconfiguring the endpoint onto the
+ * surviving NIC lanes and keeping it alive, so subsequent operations (e.g. `tagSend`)
+ * transparently reroute around the dead NIC.
+ *
+ * The failover mode only applies to worker-address endpoints: UCX rejects it for
+ * sockaddr / connection-request endpoints because those carry a connection-manager (CM)
+ * lane, which failover reconfiguration does not support (see `ucp_ep_set_lanes_failed`
+ * in UCX, guarded on `cm_lane == UCP_NULL_LANE`). Requesting failover for such an
+ * endpoint silently falls back to peer mode here so behavior stays well-defined.
+ */
+static ucp_err_handling_mode_t endpointErrorHandlingMode(uint64_t fieldMask)
+{
+  static const bool failoverRequested = []() {
+    const char* env      = std::getenv("UCXX_ERROR_HANDLING_MODE");
+    const bool requested = env != nullptr && std::string(env) == "failover";
+    if (requested)
+      ucxx_info(
+        "UCXX_ERROR_HANDLING_MODE=failover: worker-address endpoints will use "
+        "UCP_ERR_HANDLING_MODE_FAILOVER (NIC/lane failover)");
+    return requested;
+  }();
+
+  const bool isWorkerAddress =
+    (fieldMask & UCP_EP_PARAM_FIELD_REMOTE_ADDRESS) &&
+    !(fieldMask & (UCP_EP_PARAM_FIELD_SOCK_ADDR | UCP_EP_PARAM_FIELD_CONN_REQUEST));
+
+  if (failoverRequested && isWorkerAddress) return UCP_ERR_HANDLING_MODE_FAILOVER;
+  return UCP_ERR_HANDLING_MODE_PEER;
+}
 
 static std::shared_ptr<Worker> getWorker(std::shared_ptr<Component> workerOrListener)
 {
@@ -138,7 +176,7 @@ void Endpoint::create(ucp_ep_params_t* params)
   auto worker = ::ucxx::getWorker(_parent);
 
   if (_endpointErrorHandling) {
-    params->err_mode       = UCP_ERR_HANDLING_MODE_PEER;
+    params->err_mode       = endpointErrorHandlingMode(params->field_mask);
     params->err_handler.cb = endpointErrorCallback;
     params->err_handler.arg =
       new EndpointErrorCallbackContext(std::static_pointer_cast<Endpoint>(shared_from_this()));
@@ -219,9 +257,11 @@ std::shared_ptr<Endpoint> createEndpointFromConnRequest(std::shared_ptr<Listener
   return ep;
 }
 
-std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker> worker,
-                                                          std::shared_ptr<Address> address,
-                                                          bool endpointErrorHandling)
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  const std::string& localDevice)
 {
   if (worker == nullptr || worker->getHandle() == nullptr)
     throw ucxx::Error("Worker not initialized");
@@ -233,9 +273,62 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker
                                           UCP_EP_PARAM_FIELD_ERR_HANDLER,
                             .address = address->getHandle()};
 
+  // Pin this endpoint's lanes to one local device when asked. UCX_NET_DEVICES
+  // cannot express this: it is read once at context creation, so it constrains
+  // every endpoint on the worker identically. Per-endpoint pinning is what lets
+  // a caller attribute a transport failure to a specific NIC and rebuild on a
+  // different one. An unknown device name makes ucp_ep_create fail rather than
+  // silently pick another device.
+  if (!localDevice.empty()) {
+    params.field_mask |= UCP_EP_PARAM_FIELD_LOCAL_DEVICE;
+    params.local_device = localDevice.c_str();
+  }
+
   auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
   ep->create(&params);
   return ep;
+}
+
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  unsigned localDeviceIndex,
+  unsigned remoteDeviceIndex)
+{
+  if (worker == nullptr || worker->getHandle() == nullptr)
+    throw ucxx::Error("Worker not initialized");
+  if (address == nullptr || address->getHandle() == nullptr || address->getLength() == 0)
+    throw ucxx::Error("Address not initialized");
+
+  // Both ends in one field, because they are one decision: UCX selects every
+  // lane on that pair and fails the creation where the pair affords none,
+  // instead of choosing a device the caller did not name. `remoteDeviceIndex`
+  // indexes the entries of the address in `params.address` and nothing else, so
+  // an index from another address names a different device or none at all.
+  ucp_ep_params_t params = {.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS |
+                                          UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                                          UCP_EP_PARAM_FIELD_ERR_HANDLER |
+                                          UCP_EP_PARAM_FIELD_PATH,
+                            .address = address->getHandle()};
+  params.path.local_dev_index  = localDeviceIndex;
+  params.path.remote_dev_index = remoteDeviceIndex;
+
+  auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
+  ep->create(&params);
+  return ep;
+}
+
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker> worker,
+                                                          std::shared_ptr<Address> address,
+                                                          bool endpointErrorHandling)
+{
+  // Kept as a distinct symbol on purpose: adding a parameter here -- even a
+  // defaulted one -- changes the C++ mangled name and breaks every already-built
+  // consumer of libucxx.so, including the installed Cython extension. A separate
+  // entry point leaves the existing ABI untouched.
+  return createEndpointFromWorkerAddressWithDevice(
+    worker, address, endpointErrorHandling, std::string());
 }
 
 Endpoint::~Endpoint()
@@ -381,6 +474,11 @@ void Endpoint::closeBlocking(uint64_t period, uint64_t maxAttempts)
 }
 
 ucp_ep_h Endpoint::getHandle() { return _handle; }
+
+std::vector<TransportEntry> Endpoint::getTransports()
+{
+  return getWorker()->queryEndpointTransports(reinterpret_cast<uintptr_t>(_handle));
+}
 
 bool Endpoint::isAlive() const
 {

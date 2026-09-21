@@ -58,6 +58,33 @@ void* HostBuffer::data()
   return _buffer;
 }
 
+ExternalBuffer::ExternalBuffer(void* buffer,
+                               const size_t size,
+                               std::function<void()> releaser,
+                               void* userData)
+  : Buffer(BufferType::External, size),
+    _buffer{buffer},
+    _releaser{std::move(releaser)},
+    _userData{userData}
+{
+  ucxx_trace_data(
+    "ucxx::ExternalBuffer created: %p, buffer: %p, size: %lu", this, _buffer, _size);
+}
+
+ExternalBuffer::~ExternalBuffer()
+{
+  ucxx_trace_data("ucxx::ExternalBuffer::%s, ExternalBuffer: %p, buffer: %p", __func__, this, _buffer);
+  if (_releaser) _releaser();
+}
+
+void* ExternalBuffer::getUserData() const noexcept { return _userData; }
+
+void* ExternalBuffer::data()
+{
+  ucxx_trace_data("ucxx::ExternalBuffer::%s, ExternalBuffer: %p, buffer: %p", __func__, this, _buffer);
+  return _buffer;
+}
+
 std::shared_ptr<Buffer> allocateBuffer(const BufferType bufferType, const size_t size)
 {
   if (bufferType == BufferType::CCCL) {

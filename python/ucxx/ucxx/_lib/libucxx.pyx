@@ -36,6 +36,87 @@ cdef extern from "cuda_runtime.h" nogil:
     int cudaMemcpy(void* dst, const void* src, size_t count,
                    cudaMemcpyKind kind)
 
+cdef extern from *:
+    """
+    #include <ucxx/api.h>
+
+    /* Bridge a Cython trampoline (raw C function pointer + opaque argument)
+     * into the `std::function`-typed `ucxx::AmReceiverCallbackType`. Cython
+     * cannot express `std::function<void(std::shared_ptr<Request>, ucp_ep_h)>`
+     * directly (see the AmAllocatorType workaround in ucxx_api.pxd), so the
+     * lambda capture happens in this verbatim C++ helper instead.
+     */
+    using _ucxx_py_am_receiver_cb_t =
+        void (*)(std::shared_ptr<ucxx::Request>, ucp_ep_h, void*);
+
+    static ucxx::AmReceiverCallbackType _ucxx_make_am_receiver_callback(
+        _ucxx_py_am_receiver_cb_t trampoline, void* arg)
+    {
+        return [trampoline, arg](std::shared_ptr<ucxx::Request> req,
+                                 ucp_ep_h ep) { trampoline(req, ep, arg); };
+    }
+
+    /* Same bridge for the `std::function`-typed `ucxx::AmAllocatorType`, so a
+     * Python callable can serve eager AM receive allocations. */
+    using _ucxx_py_am_alloc_t =
+        std::shared_ptr<ucxx::Buffer> (*)(size_t, void*);
+
+    static ucxx::AmAllocatorType _ucxx_make_py_am_allocator(
+        _ucxx_py_am_alloc_t trampoline, void* arg)
+    {
+        return [trampoline, arg](size_t size) { return trampoline(size, arg); };
+    }
+
+    /* Wrap application-owned memory in an `ExternalBuffer`. Holds a strong
+     * reference to `owner` (the Python object exposing the memory) and drops
+     * it from the buffer's releaser, which may run on the progress thread
+     * without the GIL held. */
+    static std::shared_ptr<ucxx::Buffer> _ucxx_make_external_buffer(
+        void* ptr, size_t size, PyObject* owner)
+    {
+        Py_INCREF(owner);
+        return std::make_shared<ucxx::ExternalBuffer>(
+            ptr,
+            size,
+            [owner]() {
+                PyGILState_STATE state = PyGILState_Ensure();
+                Py_DECREF(owner);
+                PyGILState_Release(state);
+            },
+            static_cast<void*>(owner));
+    }
+
+    static std::shared_ptr<ucxx::Buffer> _ucxx_make_default_host_buffer(
+        size_t size)
+    {
+        return std::make_shared<ucxx::HostBuffer>(size);
+    }
+
+    /* Borrowed pointer to the Python owner of an `ExternalBuffer`, or null
+     * for any other buffer type. */
+    static PyObject* _ucxx_external_buffer_owner(ucxx::Buffer* buffer)
+    {
+        auto* ext = dynamic_cast<ucxx::ExternalBuffer*>(buffer);
+        return ext == nullptr ? nullptr
+                              : static_cast<PyObject*>(ext->getUserData());
+    }
+    """
+    ctypedef void (*_ucxx_py_am_receiver_cb_t)(
+        shared_ptr[Request], ucp_ep_h, void*
+    )
+    AmReceiverCallbackType _ucxx_make_am_receiver_callback(
+        _ucxx_py_am_receiver_cb_t trampoline, void* arg
+    )
+    ctypedef shared_ptr[Buffer] (*_ucxx_py_am_alloc_t)(size_t, void*)
+    AmAllocatorFunction _ucxx_make_py_am_allocator(
+        _ucxx_py_am_alloc_t trampoline, void* arg
+    )
+    shared_ptr[Buffer] _ucxx_make_external_buffer(
+        void* ptr, size_t size, PyObject* owner
+    )
+    shared_ptr[Buffer] _ucxx_make_default_host_buffer(size_t size)
+    PyObject* _ucxx_external_buffer_owner(Buffer* buffer)
+
 import numpy as np
 
 from .arr cimport Array
@@ -557,6 +638,34 @@ cdef class UCXAddress():
         return address
 
     @classmethod
+    def create_from_worker_with_devices(
+        cls, UCXWorker worker, object device_names
+    ) -> UCXAddress:
+        """Worker address advertising only ``device_names``.
+
+        A peer chooses which of this worker's NICs to write to from the address
+        entries alone, so withdrawing a dead device means publishing an address
+        without it. Separate classmethod rather than an argument on
+        ``create_from_worker`` so existing callers are untouched.
+        """
+        cdef UCXAddress address = UCXAddress.__new__(UCXAddress)
+        cdef vector[string] names
+
+        for name in device_names:
+            names.push_back(name.encode("utf-8") if isinstance(name, str) else name)
+        if names.empty():
+            raise ValueError("At least one device name must be given")
+
+        address._bytes = None
+        with nogil:
+            address._address = worker._worker.get().getAddressWithDevices(names)
+            address._handle = address._address.get().getHandle()
+            address._length = address._address.get().getLength()
+            address._string = address._address.get().getStringView()
+
+        return address
+
+    @classmethod
     def create_from_buffer(cls, const uint8_t[::1] buf) -> UCXAddress:
         cdef UCXAddress address = UCXAddress.__new__(UCXAddress)
         cdef string_view address_strv = string_view(<const char*>&buf[0], len(buf))
@@ -640,6 +749,7 @@ cdef class UCXWorker():
         cdef AmAllocatorType cccl_am_allocator
 
         self._context_feature_flags = <uint64_t>(context.feature_flags)
+        self._am_receiver_callbacks = {}
 
         with nogil:
             self._worker = createPythonWorker(
@@ -699,6 +809,99 @@ cdef class UCXWorker():
     def address(self) -> UCXAddress:
         return UCXAddress.create_from_worker(self)
 
+    def address_with_devices(self, object device_names) -> UCXAddress:
+        """Address advertising only ``device_names`` of this worker's NICs."""
+        return UCXAddress.create_from_worker_with_devices(self, device_names)
+
+    def exclude_device(self, object device_name) -> None:
+        """Retire a local NIC from all future UCX lane selection."""
+        cdef string name = (
+            device_name.encode("utf-8") if isinstance(device_name, str) else device_name
+        )
+        with nogil:
+            self._worker.get().excludeDevice(name)
+
+    def query_devices(self) -> list:
+        """Transport resources this worker can select lanes from.
+
+        One dict per transport resource, so a device carrying several transports
+        appears once per transport with the same ``index``. ``name`` is the
+        spelling ``local_device`` takes; a device retired by ``exclude_device``
+        is absent.
+        """
+        cdef vector[DeviceAttr] devices
+
+        with nogil:
+            devices = self._worker.get().queryDevices()
+
+        result = []
+        for i in range(devices.size()):
+            result.append({
+                "name": devices[i].name.decode("utf-8"),
+                "transport": devices[i].transport.decode("utf-8"),
+                "index": devices[i].index,
+                "sys_device": devices[i].sysDevice,
+                "bandwidth": devices[i].bandwidth,
+                "latency": devices[i].latency,
+                "overhead": devices[i].overhead,
+                "num_paths": devices[i].numPaths,
+                "seg_size": devices[i].segSize,
+                "cap_flags": devices[i].capFlags,
+            })
+        return result
+
+    def query_address_devices(self, UCXAddress address) -> list:
+        """Devices a peer's worker address advertises.
+
+        One dict per address entry, in advertised order. ``index`` is what
+        ``remote_device_index`` takes when creating an endpoint to *this* address, and
+        means nothing for any other. ``reachable_from_local`` is a bitmap over
+        ``query_devices()`` indices, so it is a fact about this worker.
+        """
+        cdef shared_ptr[Address] ucxx_address = address._address
+        cdef vector[RemoteDeviceAttr] entries
+
+        with nogil:
+            entries = self._worker.get().queryAddressDevices(ucxx_address)
+
+        result = []
+        for i in range(entries.size()):
+            result.append({
+                "index": entries[i].index,
+                "sys_device": entries[i].sysDevice,
+                "num_paths": entries[i].numPaths,
+                "bandwidth": entries[i].bandwidth,
+                "latency": entries[i].latency,
+                "overhead": entries[i].overhead,
+                "seg_size": entries[i].segSize,
+                "flags": entries[i].flags,
+                "reachable_from_local": entries[i].reachableFromLocal,
+                "device_address": bytes(entries[i].deviceAddress),
+            })
+        return result
+
+    def query_endpoint_transports(self, uintptr_t ucp_endpoint) -> list:
+        """``(transport, device)`` for each lane of any endpoint on this worker.
+
+        Takes a raw ``ucp_ep_h``, so it reaches the endpoint a peer's wireup
+        built, which ucxx never created and therefore has no ``UCXEndpoint``
+        for. That endpoint carries the peer's replies and anything it pulls, so
+        reading it back is how the port a request was answered on is observed
+        rather than assumed.
+        """
+        cdef vector[TransportEntry] entries
+
+        with nogil:
+            entries = self._worker.get().queryEndpointTransports(ucp_endpoint)
+
+        return [
+            (
+                entries[i].transport.decode("utf-8"),
+                entries[i].device.decode("utf-8"),
+            )
+            for i in range(entries.size())
+        ]
+
     @property
     def enable_delayed_submission(self) -> bool:
         return self._enable_delayed_submission
@@ -733,6 +936,19 @@ cdef class UCXWorker():
     ) -> UCXEndpoint:
         return UCXEndpoint.create_from_worker_address(
             self, address, endpoint_error_handling
+        )
+
+    def create_endpoint_from_worker_address_with_device(
+            self,
+            UCXAddress address,
+            bint endpoint_error_handling,
+            local_device,
+            remote_device_index=None,
+            local_device_index=None
+    ) -> UCXEndpoint:
+        return UCXEndpoint.create_from_worker_address_with_device(
+            self, address, endpoint_error_handling, local_device,
+            remote_device_index, local_device_index
         )
 
     def init_blocking_progress_mode(self) -> None:
@@ -856,6 +1072,125 @@ cdef class UCXWorker():
                 deref(func_generic_callback), <void*>self._progress_thread_start_cb_data
             )
         del func_generic_callback
+
+    def register_am_receiver_callback(
+            self, str owner, uint64_t identifier, cb_func
+    ) -> None:
+        """Register a worker-scoped active message receiver callback.
+
+        The callback fires for every incoming active message whose sender
+        tagged it with the same `(owner, identifier)` pair (see the
+        `receiver_callback_info` argument of `UCXEndpoint.am_send`), and
+        auto-re-arms — unlike `am_recv()`, no receive needs to be posted per
+        message. Messages routed to a receiver callback are consumed by it
+        exclusively; they will never match an `am_recv()`.
+
+        The registration is worker-scoped and lives for the worker's
+        lifetime; there is no unregister. The owner name "ucxx" is reserved.
+
+        Parameters
+        ----------
+        owner: str
+            Name identifying the callback's owner, e.g. the application name.
+        identifier: int
+            Callback identifier, unique within `owner`.
+        cb_func: callable
+            Called as `cb_func(request: UCXRequest, ep_handle: int)` for each
+            delivered message, where `request` is the completed receive
+            request (payload available via `request.recv_buffer`) and
+            `ep_handle` is the `ucp_ep_h` of the sender's reply endpoint.
+
+            **Executes on the UCXX progress thread** with the GIL acquired:
+            it must be quick and non-blocking (e.g. hand off to an event
+            loop); blocking stalls all UCX progress for the worker.
+        """
+        if not self._context_feature_flags & Feature.AM.value:
+            raise ValueError("UCXContext must be created with `Feature.AM`")
+
+        key = (owner, identifier)
+        if key in self._am_receiver_callbacks:
+            raise ValueError(
+                f"AM receiver callback already registered for {key}"
+            )
+
+        # Keeps the trampoline's `void*` argument alive: the C++ side holds a
+        # borrowed pointer to this dict for the worker's lifetime.
+        cdef dict cb_data = {
+            "cb_func": cb_func,
+            "enable_python_future": self._enable_python_future,
+        }
+        self._am_receiver_callbacks[key] = cb_data
+
+        cdef bytes owner_bytes = owner.encode("utf-8")
+        cdef const char* owner_c_str = owner_bytes
+        cdef uint64_t cb_id = identifier
+        cdef AmReceiverCallbackType wrapped_callback = (
+            _ucxx_make_am_receiver_callback(
+                <_ucxx_py_am_receiver_cb_t>&_am_receiver_callback,
+                <void*>cb_data,
+            )
+        )
+        # Heap-construct: AmReceiverCallbackInfo has no default constructor,
+        # which Cython requires for stack temporaries of C++ classes.
+        cdef AmReceiverCallbackInfo* cb_info = (
+            new AmReceiverCallbackInfo(owner_c_str, cb_id)
+        )
+        try:
+            with nogil:
+                self._worker.get().registerAmReceiverCallback(
+                    deref(cb_info), wrapped_callback
+                )
+        except Exception:
+            del self._am_receiver_callbacks[key]
+            raise
+        finally:
+            del cb_info
+
+    def register_am_host_allocator(self, cb_func) -> None:
+        """Register a Python allocator for host-memory active message receives.
+
+        Once registered, every eager host-memory active message received on
+        this worker is delivered into a buffer obtained from `cb_func` instead
+        of an internally `malloc`ed one, eliminating one host copy when the
+        application would otherwise immediately copy the payload into its own
+        staging memory.
+
+        Registering again replaces the previous allocator. There is no
+        unregister; the registration lives for the worker's lifetime.
+
+        Parameters
+        ----------
+        cb_func: callable
+            Called as `cb_func(size: int)` for each allocation. It must
+            return either an object exposing at least `size` writable
+            contiguous bytes via the buffer protocol (e.g. a NumPy array) or
+            `None` to decline, in which case UCXX falls back to an internal
+            host allocation for that message. The returned object is kept
+            alive until UCXX drops the receive buffer, and is handed back
+            as-is by `UCXRequest.recv_buffer`.
+
+            **Executes on the UCXX progress thread** with the GIL acquired:
+            it must be quick and non-blocking; blocking stalls all UCX
+            progress for the worker.
+        """
+        if not self._context_feature_flags & Feature.AM.value:
+            raise ValueError("UCXContext must be created with `Feature.AM`")
+
+        # Keeps the trampoline's `void*` argument alive: the C++ side holds a
+        # borrowed pointer to this dict for the worker's lifetime.
+        cdef dict cb_data = {"cb_func": cb_func}
+        self._am_host_allocator_data = cb_data
+
+        cdef AmAllocatorFunction wrapped_allocator = (
+            _ucxx_make_py_am_allocator(
+                <_ucxx_py_am_alloc_t>&_am_host_allocator,
+                <void*>cb_data,
+            )
+        )
+        with nogil:
+            self._worker.get().registerAmAllocator(
+                UCS_MEMORY_TYPE_HOST, wrapped_allocator
+            )
 
     def stop_request_notifier_thread(self) -> None:
         with nogil:
@@ -998,6 +1333,7 @@ cdef class UCXRequest():
     def recv_buffer(self) -> object:
         cdef shared_ptr[Buffer] buf
         cdef BufferType bufType
+        cdef PyObject* owner_ptr
 
         with nogil:
             buf = self._request.get().getRecvBuffer()
@@ -1010,6 +1346,16 @@ cdef class UCXRequest():
             return _get_cccl_buffer(buf)
         elif bufType == BufferType.Host:
             return _get_host_buffer(<uintptr_t><void*>buf.get())
+        elif bufType == BufferType.External:
+            # Buffer allocated by an application allocator (see
+            # `UCXWorker.register_am_host_allocator`): hand the application's
+            # own object back. The borrowed pointer is kept alive by the
+            # `ExternalBuffer`'s strong reference until the request drops it;
+            # the cast below takes a new reference for the caller.
+            owner_ptr = _ucxx_external_buffer_owner(buf.get())
+            if owner_ptr == NULL:
+                return None
+            return <object>owner_ptr
 
     def check_error(self) -> None:
         with nogil:
@@ -1064,6 +1410,16 @@ cdef class UCXBufferRequest:
             return _get_cccl_buffer(buf)
         elif bufType == BufferType.Host:
             return _get_host_buffer(<uintptr_t><void*>buf.get())
+        elif bufType == BufferType.External:
+            # Buffer allocated by an application allocator (see
+            # `UCXWorker.register_am_host_allocator`): hand the application's
+            # own object back. The borrowed pointer is kept alive by the
+            # `ExternalBuffer`'s strong reference until the request drops it;
+            # the cast below takes a new reference for the caller.
+            owner_ptr = _ucxx_external_buffer_owner(buf.get())
+            if owner_ptr == NULL:
+                return None
+            return <object>owner_ptr
 
 
 cdef class UCXBufferRequests:
@@ -1177,6 +1533,63 @@ cdef class UCXBufferRequests:
             await self.wait_yield()
 
 
+cdef void _am_receiver_callback(
+    shared_ptr[Request] req, ucp_ep_h ep, void* args
+) with gil:
+    """Trampoline for AM receiver callbacks registered from Python.
+
+    Runs on the UCXX progress thread with the GIL acquired; the Python
+    callback must not block. `args` is a borrowed reference to the
+    per-registration data dict kept alive by
+    `UCXWorker._am_receiver_callbacks`.
+    """
+    cdef dict cb_data = <dict>args
+    cdef UCXRequest request = UCXRequest(
+        <uintptr_t><void*>&req, cb_data["enable_python_future"]
+    )
+
+    try:
+        cb_data["cb_func"](request, int(<uintptr_t>ep))
+    except Exception as e:
+        logger.error(f"{type(e)} when calling AM receiver callback: {e}")
+
+
+cdef shared_ptr[Buffer] _am_host_allocator(size_t size, void* args) with gil:
+    """Trampoline for the AM host allocator registered from Python.
+
+    Runs on the UCXX progress thread with the GIL acquired; the Python
+    callback must not block. `args` is a borrowed reference to the data dict
+    kept alive by `UCXWorker._am_host_allocator_data`. Never propagates an
+    exception and never returns null: any failure or a `None` from the
+    callback falls back to a default internal host allocation, since the
+    eager receive path treats a null buffer as a fatal `UCS_ERR_NO_MEMORY`.
+    """
+    cdef dict cb_data = <dict>args
+    cdef Array arr
+
+    try:
+        obj = cb_data["cb_func"](size)
+        if obj is not None:
+            arr = Array(obj)
+            if arr.cuda or arr.readonly or not arr._contiguous():
+                raise ValueError(
+                    "AM host allocator must return writable contiguous "
+                    "host memory"
+                )
+            if arr.nbytes < size:
+                raise ValueError(
+                    f"AM host allocator returned {arr.nbytes} bytes, "
+                    f"need {size}"
+                )
+            return _ucxx_make_external_buffer(
+                <void*>arr.ptr, size, <PyObject*>obj
+            )
+    except Exception as e:
+        logger.error(f"{type(e)} when calling AM host allocator: {e}")
+
+    return _ucxx_make_default_host_buffer(size)
+
+
 cdef void _endpoint_close_callback(ucs_status_t status, shared_ptr[void] args) with gil:
     """Callback function called when UCXEndpoint closes or errors"""
     cdef shared_ptr[uintptr_t] cb_data_ptr = static_pointer_cast[uintptr_t, void](args)
@@ -1258,6 +1671,71 @@ cdef class UCXEndpoint():
         return endpoint
 
     @classmethod
+    def create_from_worker_address_with_device(
+            cls,
+            UCXWorker worker,
+            UCXAddress address,
+            bint endpoint_error_handling,
+            local_device,
+            remote_device_index=None,
+            local_device_index=None
+    ) -> UCXEndpoint:
+        """Create an endpoint pinned to one local device, or to one whole path.
+
+        Separate from create_from_worker_address so the existing entry point,
+        and the C++ symbol behind it, are left untouched. Passing both
+        ``local_device_index`` and ``remote_device_index`` names the whole path
+        and every lane is selected on that pair; passing neither names this end
+        alone, by ``local_device``, and lane selection picks the peer's device
+        as it always did. The remote index comes from
+        ``UCXWorker.query_address_devices(address)`` over this same address and
+        is valid for it alone.
+        """
+        cdef UCXEndpoint endpoint = UCXEndpoint.__new__(UCXEndpoint)
+        cdef shared_ptr[Context] ucxx_context
+        cdef shared_ptr[Address] ucxx_address = address._address
+        # Encode before the nogil block, which must touch no Python objects.
+        cdef string ucxx_local_device = (
+            local_device.encode("utf-8") if local_device else b""
+        )
+        cdef bint on_path = (
+            remote_device_index is not None and local_device_index is not None
+        )
+        cdef unsigned int ucxx_remote_index = (
+            remote_device_index if remote_device_index is not None else 0
+        )
+        cdef unsigned int ucxx_local_index = (
+            local_device_index if local_device_index is not None else 0
+        )
+
+        endpoint._enable_python_future = worker.enable_python_future
+
+        with nogil:
+            ucxx_context = dynamic_pointer_cast[Context, Component](
+                worker._worker.get().getParent()
+            )
+
+            endpoint._context_feature_flags = ucxx_context.get().getFeatureFlags()
+            endpoint._cuda_support = ucxx_context.get().hasCudaSupport()
+            # Two C++ entry points, one per shape: a whole path, or this end
+            # alone. There is none that takes half a path.
+            if on_path:
+                endpoint._endpoint = (
+                    worker._worker.get().createEndpointFromWorkerAddressOnPath(
+                        ucxx_address, endpoint_error_handling, ucxx_local_index,
+                        ucxx_remote_index
+                    )
+                )
+            else:
+                endpoint._endpoint = (
+                    worker._worker.get().createEndpointFromWorkerAddressWithDevice(
+                        ucxx_address, endpoint_error_handling, ucxx_local_device
+                    )
+                )
+
+        return endpoint
+
+    @classmethod
     def create_from_worker_address(
             cls,
             UCXWorker worker,
@@ -1291,6 +1769,27 @@ cdef class UCXEndpoint():
             handle = self._endpoint.get().getHandle()
 
         return int(<uintptr_t>handle)
+
+    @property
+    def transports(self) -> list:
+        """``(transport, device)`` for each lane this endpoint selected.
+
+        What UCX chose, not what was asked for: an endpoint created with a
+        a ``local_device`` or a path is only known to have honoured it
+        by reading it back from here.
+        """
+        cdef vector[TransportEntry] entries
+
+        with nogil:
+            entries = self._endpoint.get().getTransports()
+
+        return [
+            (
+                entries[i].transport.decode("utf-8"),
+                entries[i].device.decode("utf-8"),
+            )
+            for i in range(entries.size())
+        ]
 
     @property
     def ucxx_ptr(self) -> int:
@@ -1360,23 +1859,60 @@ cdef class UCXEndpoint():
 
         return ep_matched
 
-    def am_send(self, Array arr) -> UCXRequest:
+    def am_send(self, Array arr, tuple receiver_callback_info=None) -> UCXRequest:
+        """Send `arr` to the connected peer via an active message.
+
+        Parameters
+        ----------
+        arr: Array
+            The buffer to send.
+        receiver_callback_info: tuple(str, int), optional
+            `(owner, identifier)` of a receiver callback registered on the
+            peer's worker via `UCXWorker.register_am_receiver_callback`. When
+            given, the message is delivered to that callback (and only that
+            callback — the peer's `am_recv()` will not match it). When
+            `None`, the message matches the peer's `am_recv()` as before.
+        """
         cdef void* buf = <void*>arr.ptr
         cdef size_t nbytes = arr.nbytes
         cdef bint cuda_array = arr.cuda
         cdef shared_ptr[Request] req
+        cdef bytes owner_bytes
+        cdef const char* owner_c_str
+        cdef uint64_t cb_id
+        cdef AmReceiverCallbackInfo* cb_info
 
         if not self._context_feature_flags & Feature.AM.value:
             raise ValueError("UCXContext must be created with `Feature.AM`")
 
-        with nogil:
-            req = self._endpoint.get().amSend(
-                buf,
-                nbytes,
-                UCS_MEMORY_TYPE_CUDA if cuda_array else UCS_MEMORY_TYPE_HOST,
-                nullopt,
-                self._enable_python_future
-            )
+        if receiver_callback_info is not None:
+            owner, identifier = receiver_callback_info
+            owner_bytes = owner.encode("utf-8")
+            owner_c_str = owner_bytes
+            cb_id = identifier
+            # Heap-construct: no default constructor (see
+            # register_am_receiver_callback).
+            cb_info = new AmReceiverCallbackInfo(owner_c_str, cb_id)
+            try:
+                with nogil:
+                    req = self._endpoint.get().amSend(
+                        buf,
+                        nbytes,
+                        UCS_MEMORY_TYPE_CUDA if cuda_array else UCS_MEMORY_TYPE_HOST,
+                        deref(cb_info),
+                        self._enable_python_future
+                    )
+            finally:
+                del cb_info
+        else:
+            with nogil:
+                req = self._endpoint.get().amSend(
+                    buf,
+                    nbytes,
+                    UCS_MEMORY_TYPE_CUDA if cuda_array else UCS_MEMORY_TYPE_HOST,
+                    nullopt,
+                    self._enable_python_future
+                )
 
         return UCXRequest(<uintptr_t><void*>&req, self._enable_python_future)
 

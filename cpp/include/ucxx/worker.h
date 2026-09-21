@@ -8,11 +8,13 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <ucp/api/ucp.h>
 
@@ -71,6 +73,10 @@ class Worker : public Component {
     _inflightRequestsToCancelMutex{};  ///< Mutex to access the inflight requests to cancel pool
   std::unique_ptr<InflightRequests> _inflightRequestsToCancel{
     std::make_unique<InflightRequests>()};  ///< The inflight requests scheduled to be canceled
+  std::unique_ptr<InflightRequests> _cancelingInflightRequests{
+    std::make_unique<InflightRequests>()};  ///< Requests whose cancelation was attempted but
+                                            ///< remain in progress; pruned as they complete,
+                                            ///< never re-canceled
   WorkerProgressThread _progressThread{};   ///< The progress thread object
   std::atomic<bool> _progressThreadRunning{false};      ///< Whether the progress thread is running
   std::atomic<bool> _progressThreadPollingMode{false};  ///< Whether the progress thread polls
@@ -730,6 +736,17 @@ class Worker : public Component {
   void removeInflightRequest(std::shared_ptr<Request> request);
 
   /**
+   * @brief Get the number of parked canceled-but-incomplete requests.
+   *
+   * Requests whose cancelation was attempted but that remain in progress
+   * are parked until their completion removes them; this returns the
+   * current parked count without scanning request statuses.
+   *
+   * @returns the number of parked requests.
+   */
+  [[nodiscard]] size_t cancelingRequestsSize();
+
+  /**
    * @brief Check for uncaught tag messages.
    *
    * Checks the worker for any uncaught tag messages. An uncaught tag message is any
@@ -893,6 +910,102 @@ class Worker : public Component {
   [[nodiscard]] std::shared_ptr<Address> getAddress();
 
   /**
+   * @brief Get the worker address, listing only the given local devices.
+   *
+   * Like `getAddress()`, but the returned address advertises only the transport
+   * resources of `deviceNames`.
+   *
+   * This is what lets a worker steer its peers away from one of its own NICs. A
+   * peer picks which of this worker's devices to write to from the address
+   * entries alone, so an address that still lists a dead device keeps inviting
+   * traffic to it, and nothing the peer does locally can avoid that. Publishing
+   * a restricted address is the only way to withdraw a device.
+   *
+   * Separate from `getAddress()` rather than a defaulted argument, so already
+   * built consumers of libucxx.so keep working.
+   *
+   * @param[in] deviceNames device names as they appear in UCX_NET_DEVICES, e.g.
+   *                        "mlx5_0". Must not be empty.
+   *
+   * @throws std::invalid_argument if `deviceNames` is empty.
+   * @throws ucxx::Error if none of the named devices has usable resources.
+   *
+   * @returns The address of the local worker, restricted to those devices.
+   */
+  [[nodiscard]] std::shared_ptr<Address> getAddressWithDevices(
+    const std::vector<std::string>& deviceNames);
+
+  /**
+   * @brief Stop using a local device for any future lane selection.
+   *
+   * Retires `deviceName` from the set this worker's context draws on. Endpoints
+   * already created keep their lanes.
+   *
+   * Needed alongside `getAddressWithDevices()`, not instead of it: that one stops
+   * peers writing to the device, this one stops *us* selecting it for our own
+   * outbound wireup. A worker that only does the former keeps failing UD connect
+   * against a dead port, because IB port state is read at device init and a port
+   * that dies later still looks usable.
+   *
+   * Not reversible -- restoring a device needs a new context.
+   *
+   * @param[in] deviceName device name as in UCX_NET_DEVICES, e.g. "mlx5_0:1".
+   *
+   * @throws ucxx::Error if the device has no resources on this context.
+   */
+  void excludeDevice(const std::string& deviceName);
+
+  /**
+   * @brief Report the transport resources this worker can select lanes from.
+   *
+   * One entry per usable transport resource, so a caller can name a device in
+   * `createEndpointFromWorkerAddressWithDevice()` and weigh its bandwidth,
+   * latency and topology placement beforehand. A device retired by
+   * `excludeDevice()` is not reported.
+   *
+   * @throws ucxx::Error if the worker's resources cannot be queried.
+   *
+   * @returns One `DeviceAttr` per transport resource, in UCX's own order.
+   */
+  [[nodiscard]] std::vector<DeviceAttr> queryDevices();
+
+  /**
+   * @brief Report the devices a peer's worker address advertises.
+   *
+   * One entry per transport resource the address carries, so a caller can choose
+   * a peer device, pass its `RemoteDeviceAttr::index` as `remoteDevice`, and know
+   * beforehand which of this worker's devices reach it.
+   *
+   * On this worker rather than on `Address` because
+   * `RemoteDeviceAttr::reachableFromLocal` is a fact about this worker's devices,
+   * and because a peer address built from bytes has no worker to ask.
+   *
+   * @param[in] address a peer's worker address.
+   *
+   * @throws ucxx::Error if the address cannot be unpacked.
+   *
+   * @returns One `RemoteDeviceAttr` per address entry, in advertised order.
+   */
+  [[nodiscard]] std::vector<RemoteDeviceAttr> queryAddressDevices(std::shared_ptr<Address> address);
+
+  /**
+   * @brief Report the transports an endpoint on this worker selected.
+   *
+   * On this worker rather than on `Endpoint` because the endpoint a peer's
+   * wireup built is not one ucxx created: it exists only as a `ucp_ep_h` on
+   * this worker, and that handle is meaningful against no other worker. Reading
+   * it back is the only way to learn which port a peer's request was answered
+   * on.
+   *
+   * @param[in] ucpEndpointHandle a `ucp_ep_h` belonging to this worker.
+   *
+   * @throws ucxx::Error if the endpoint cannot be queried.
+   *
+   * @returns One `TransportEntry` per lane, in UCX's own order.
+   */
+  [[nodiscard]] std::vector<TransportEntry> queryEndpointTransports(uintptr_t ucpEndpointHandle);
+
+  /**
    * @brief Create endpoint to worker listening on specific IP and port.
    *
    * Creates an endpoint to a remote worker listening on a specific IP address and port.
@@ -949,6 +1062,49 @@ class Worker : public Component {
    */
   [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(
     std::shared_ptr<Address> address, bool endpointErrorHandling = true);
+
+  /**
+   * @brief Like createEndpointFromWorkerAddress, pinned to one device at each end.
+   *
+   * Separate name rather than an added parameter on
+   * `createEndpointFromWorkerAddress()`: changing that signature would change its
+   * mangled name and break already-built consumers.
+   *
+   * @param[in] address               address of the remote UCX worker.
+   * @param[in] endpointErrorHandling enable endpoint error handling if `true`.
+   * @param[in] localDevice           local device to restrict this endpoint's lanes
+   *                                  to, or empty for no local restriction.
+   * @param[in] remoteDevice          `RemoteDeviceAttr::index` from
+   */
+  [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    const std::string& localDevice);
+
+  /**
+   * @brief Create an endpoint on one path: both ends, neither optional.
+   *
+   * Every lane is selected on that pair of devices, and the creation fails
+   * where the pair affords none rather than selecting elsewhere. Naming both
+   * ends is what places two endpoints between the same pair of workers on
+   * disjoint paths.
+   *
+   * @param[in] address               the remote worker's address.
+   * @param[in] endpointErrorHandling whether to enable endpoint error handling.
+   * @param[in] localDeviceIndex      a `DeviceAttr::index` from `queryDevices()`.
+   * @param[in] remoteDeviceIndex     a `RemoteDeviceAttr::index` from
+   *                                  `queryAddressDevices(address)`, valid for
+   *                                  that address alone.
+   *
+   * @throws ucxx::Error if the pair affords no lane.
+   *
+   * @returns The `shared_ptr<ucxx::Endpoint>` object
+   */
+  [[nodiscard]] std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    unsigned localDeviceIndex,
+    unsigned remoteDeviceIndex);
 
   /**
    * @brief Listen for remote connections on given port.

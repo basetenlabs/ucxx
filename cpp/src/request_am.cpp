@@ -482,9 +482,10 @@ void RequestAm::populateDelayedSubmission()
   bool terminate =
     std::visit(data::dispatch{
                  [this](data::AmSend) {
-                   if (_endpoint->getHandle() == nullptr) {
-                     ucxx_warn("Endpoint was closed before message could be sent");
-                     Request::callback(this, UCS_ERR_CANCELED);
+                   if (getStatus() != UCS_INPROGRESS) return true;
+                   if (_endpoint->_closing.load() || _endpoint->getHandle() == nullptr) {
+                     ucxx_warn("Endpoint was closing or closed before message could be sent");
+                     cancel();
                      return true;
                    }
                    return false;

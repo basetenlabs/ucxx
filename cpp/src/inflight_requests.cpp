@@ -26,10 +26,17 @@ void InflightRequests::insert(const std::shared_ptr<Request>& request)
   _inflight.insert(request);
 }
 
+size_t InflightRequests::cancelingSize()
+{
+  std::lock_guard<std::mutex> lock(_mutex);
+  return _canceling.size();
+}
+
 void InflightRequests::remove(const std::shared_ptr<Request>& request)
 {
   std::lock_guard<std::mutex> lock(_mutex);
   _inflight.erase(request);
+  _canceling.erase(request);
 }
 
 void InflightRequests::merge(TrackedRequests&& trackedRequests)
@@ -88,14 +95,47 @@ TrackedRequests InflightRequests::release()
 
 size_t InflightRequests::getCancelingSize()
 {
-  std::lock_guard<std::mutex> lock(_mutex);
-
-  for (auto it = _canceling.begin(); it != _canceling.end();) {
-    if (*it && (*it)->getStatus() != UCS_INPROGRESS)
-      it = _canceling.erase(it);
-    else
-      ++it;
+  /* Two-phase: snapshot under the container lock, query request status
+   * without it, erase completed entries under the lock again.
+   *
+   * The phases exist to avoid an AB-BA deadlock with the completion path:
+   *
+   * - Thread A (request completes): `Request::setStatus()` holds the
+   *   REQUEST mutex, then calls `Worker::removeInflightRequest()` ->
+   *   `InflightRequests::remove()`, which takes this CONTAINER mutex.
+   *   Order: request -> container.
+   * - Thread B (this function, single-lock version): holds the CONTAINER
+   *   mutex while `r->getStatus()` takes the REQUEST mutex.
+   *   Order: container -> request.
+   *
+   * If A completes the exact request B is querying, A waits for the
+   * container mutex while B waits for that request's mutex - both stuck
+   * forever, wedging the progress thread (which runs the completion
+   * callbacks). Parked requests complete in bursts during endpoint
+   * teardown, which is also when new batches are parked and pruned, so
+   * the single-lock version is not a rare race.
+   *
+   * TODO: clean up this two-phase workaround by making
+   * `Request::_status` a `std::atomic` so `getStatus()` is a lock-free
+   * read; then this function can hold the container lock for a single
+   * simple pass (and the same inversion between
+   * `Endpoint::cancelInflightRequestsBlocking` and completing requests
+   * on the endpoint's container disappears class-wide). */
+  std::vector<std::shared_ptr<Request>> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    snapshot.reserve(_canceling.size());
+    for (auto& r : _canceling)
+      snapshot.push_back(r);
   }
+
+  std::vector<std::shared_ptr<Request>> completed;
+  for (auto& r : snapshot)
+    if (!r || r->getStatus() != UCS_INPROGRESS) completed.push_back(r);
+
+  std::lock_guard<std::mutex> lock(_mutex);
+  for (auto& r : completed)
+    _canceling.erase(r);
 
   return _canceling.size();
 }

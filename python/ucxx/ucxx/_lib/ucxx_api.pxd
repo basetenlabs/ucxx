@@ -4,7 +4,7 @@
 
 from posix cimport fcntl
 
-from libc.stdint cimport int64_t, uint16_t, uint64_t
+from libc.stdint cimport int64_t, uint8_t, uint16_t, uint64_t, uintptr_t
 from libcpp cimport bool as cpp_bool
 from libcpp.functional cimport function
 from libcpp.memory cimport shared_ptr, unique_ptr
@@ -22,6 +22,8 @@ cdef extern from "Python.h" nogil:
 
 cdef extern from "ucp/api/ucp.h" nogil:
     # Typedefs
+    ctypedef uint8_t ucs_sys_device_t
+
     ctypedef struct ucp_config_t:
         pass
 
@@ -145,6 +147,7 @@ cdef extern from "<ucxx/buffer.h>" namespace "ucxx" nogil:
     cdef enum class BufferType:
         Host
         CCCL
+        External
         Invalid
 
     cdef cppclass Buffer:
@@ -190,6 +193,15 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         ucp_tag_message_h getHandle() except +
 
     cdef cppclass AmReceiverCallbackInfo:
+        # The C++ constructor takes (AmReceiverCallbackOwnerType, AmReceiverCallbackIdType);
+        # `const char*` converts implicitly to the owner type (which validates length and
+        # may throw), and the id type is a uint64_t typedef.
+        AmReceiverCallbackInfo(const char* owner, uint64_t id) except +
+
+    # `std::function<void(std::shared_ptr<Request>, ucp_ep_h)>`. Left opaque: Cython
+    # cannot express the template arguments (same limitation as AmAllocatorType below);
+    # instances are produced by the verbatim C++ helper in libucxx.pyx.
+    cdef cppclass AmReceiverCallbackType:
         pass
 
     # Using function[Buffer] here doesn't seem possible due to Cython bugs/limitations.
@@ -198,6 +210,12 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
     # See https://github.com/cython/cython/issues/2041 and
     # https://github.com/cython/cython/issues/3193
     ctypedef shared_ptr[Buffer] (*AmAllocatorType)(size_t)
+
+    # The same C++ `ucxx::AmAllocatorType` (a std::function), left opaque so a
+    # capturing allocator built by the verbatim helper in libucxx.pyx can be
+    # passed where the raw-pointer typedef above cannot carry state.
+    cdef cppclass AmAllocatorFunction "ucxx::AmAllocatorType":
+        pass
 
     ctypedef cpp_unordered_map[string, string] ConfigMap
 
@@ -233,15 +251,62 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         uint64_t getFeatureFlags()
         bint hasCudaSupport()
 
+    cdef cppclass DeviceAttr:
+        string name
+        string transport
+        unsigned int index
+        ucs_sys_device_t sysDevice
+        double bandwidth
+        double latency
+        double overhead
+        unsigned int numPaths
+        size_t segSize
+        uint64_t capFlags
+
+    cdef cppclass RemoteDeviceAttr:
+        unsigned int index
+        ucs_sys_device_t sysDevice
+        unsigned int numPaths
+        double bandwidth
+        double latency
+        double overhead
+        size_t segSize
+        uint64_t flags
+        uint64_t reachableFromLocal
+        vector[uint8_t] deviceAddress
+
+    cdef cppclass TransportEntry:
+        string transport
+        string device
+
     cdef cppclass Worker(Component):
         ucp_worker_h getHandle()
         string getInfo() except +raise_py_error
         shared_ptr[Address] getAddress() except +raise_py_error
+        shared_ptr[Address] getAddressWithDevices(
+            const vector[string]& device_names
+        ) except +raise_py_error
+        vector[DeviceAttr] queryDevices() except +raise_py_error
+        vector[RemoteDeviceAttr] queryAddressDevices(
+            shared_ptr[Address] address
+        ) except +raise_py_error
+        vector[TransportEntry] queryEndpointTransports(
+            uintptr_t ucp_endpoint_handle
+        ) except +raise_py_error
+        void excludeDevice(const string& device_name) except +raise_py_error
         shared_ptr[Endpoint] createEndpointFromHostname(
             string ip_address, uint16_t port, bint endpoint_error_handling
         ) except +raise_py_error
         shared_ptr[Endpoint] createEndpointFromWorkerAddress(
             shared_ptr[Address] address, bint endpoint_error_handling
+        ) except +raise_py_error
+        shared_ptr[Endpoint] createEndpointFromWorkerAddressWithDevice(
+            shared_ptr[Address] address, bint endpoint_error_handling,
+            const string& local_device
+        ) except +raise_py_error
+        shared_ptr[Endpoint] createEndpointFromWorkerAddressOnPath(
+            shared_ptr[Address] address, bint endpoint_error_handling,
+            unsigned int local_device_index, unsigned int remote_device_index
         ) except +raise_py_error
         shared_ptr[Listener] createListener(
             uint16_t port, ucp_listener_conn_callback_t callback, void *callback_args
@@ -288,10 +353,17 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         void registerAmAllocator(
             ucs_memory_type_t memoryType, AmAllocatorType allocator
         )
+        void registerAmAllocator(
+            ucs_memory_type_t memoryType, AmAllocatorFunction allocator
+        ) except +raise_py_error
+        void registerAmReceiverCallback(
+            AmReceiverCallbackInfo info, AmReceiverCallbackType callback
+        ) except +raise_py_error
         BufferType getCudaBufferType() const
 
     cdef cppclass Endpoint(Component):
         ucp_ep_h getHandle()
+        vector[TransportEntry] getTransports() except +raise_py_error
         shared_ptr[Request] close(
             bint enable_python_future
         ) except +raise_py_error
@@ -302,8 +374,17 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
             ucs_memory_type_t memory_type,
             # Using `nullopt_t` is a workaround for Cython error
             # "Cannot assign type 'nullopt_t' to 'optional[AmReceiverCallbackInfo]'"
-            # Must change when AM receiver callbacks are implemented in Python.
             nullopt_t receiver_callback_info,
+            bint enable_python_future
+        ) except +raise_py_error
+        # Same C++ method as above: both `nullopt_t` and a bare
+        # `AmReceiverCallbackInfo` convert implicitly to the
+        # `optional[AmReceiverCallbackInfo]` parameter that Cython cannot spell.
+        shared_ptr[Request] amSend(
+            const void* const buffer,
+            size_t length,
+            ucs_memory_type_t memory_type,
+            AmReceiverCallbackInfo receiver_callback_info,
             bint enable_python_future
         ) except +raise_py_error
         shared_ptr[Request] amRecv(

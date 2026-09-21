@@ -203,6 +203,68 @@ class ApplicationContext:
     def worker_address(self):
         return self.worker.address
 
+    def exclude_device(self, device_name):
+        """Retire a local NIC from future lane selection on this worker."""
+        return self.worker.exclude_device(device_name)
+
+    def query_devices(self):
+        """Transport resources this worker can select lanes from.
+
+        One dict per transport resource; ``name`` is what ``local_device`` takes.
+        """
+        return self.worker.query_devices()
+
+    def query_address_devices(self, address):
+        """Devices a peer's worker address advertises.
+
+        One dict per address entry. ``index`` is what ``remote_device_index`` takes for
+        this same address, and ``reachable_from_local`` is a bitmap over this
+        worker's ``query_devices()`` indices.
+        """
+        return self.worker.query_address_devices(address)
+
+    def query_endpoint_transports(self, ucp_endpoint):
+        """``(transport, device)`` for each lane of an endpoint on this worker.
+
+        Takes a raw ``ucp_ep_h``, so it reaches the endpoint a peer's wireup
+        built, which ucxx never created and has no ``Endpoint`` object for.
+        """
+        return self.worker.query_endpoint_transports(ucp_endpoint)
+
+    def worker_address_with_devices(self, device_names):
+        """Worker address listing only ``device_names``.
+
+        Used to withdraw a NIC from what peers may write to: they select the
+        destination device from the address entries alone, so an address that
+        still lists a dead NIC keeps drawing traffic to it.
+        """
+        return self.worker.address_with_devices(device_names)
+
+    def register_am_receiver_callback(self, owner, identifier, cb_func):
+        """Register a worker-scoped active message receiver callback.
+
+        Fires for every incoming active message sent with a matching
+        `receiver_callback_info=(owner, identifier)` (see
+        `Endpoint.am_send`), and auto-re-arms. `cb_func(request, ep_handle)`
+        executes on the UCXX progress thread and must not block — hand off
+        to an event loop for real work; the message payload is available
+        via `request.recv_buffer`.
+        """
+        self.worker.register_am_receiver_callback(owner, identifier, cb_func)
+
+    def register_am_host_allocator(self, cb_func):
+        """Register an allocator for host-memory active message receives.
+
+        Every eager host-memory active message received on the worker is
+        delivered into a buffer obtained from `cb_func(size)` instead of an
+        internal allocation. `cb_func` must return an object exposing at
+        least `size` writable contiguous bytes via the buffer protocol, or
+        `None` to fall back to an internal allocation for that message; the
+        returned object is handed back as-is by `request.recv_buffer`.
+        Executes on the UCXX progress thread and must not block.
+        """
+        self.worker.register_am_host_allocator(cb_func)
+
     def clear_progress_tasks(self) -> None:
         global ProgressTasks
         ProgressTasks.clear()
@@ -442,6 +504,117 @@ class ApplicationContext:
         logger.debug(
             "create_endpoint() client: %s, error handling: %s"
             % (hex(ep._ep.handle), endpoint_error_handling)
+        )
+
+        return ep
+
+    async def create_endpoint_from_worker_address_with_device(
+        self,
+        address,
+        *,
+        endpoint_error_handling=True,
+        local_device=None,
+    ):
+        """Create an endpoint pinned to one local device, this end only.
+
+        Keyword-only past `address`: the device used to be the second positional
+        parameter in callers' minds, which silently bound it to
+        `endpoint_error_handling` and left the endpoint unpinned.
+
+        Parameters
+        ----------
+        address: UCXAddress
+        endpoint_error_handling: boolean, optional
+            As in `create_endpoint_from_worker_address`.
+        local_device: str, optional
+            Name of the local device to restrict this endpoint's lanes to, e.g.
+            "mlx5_bond_0:1". Unlike UCX_NET_DEVICES, which is fixed at context
+            creation and applies to every endpoint on the worker, this affects
+            only this endpoint. Intended for application-level NIC failover: a
+            pinned endpoint makes a transport failure attributable to one
+            device, so a replacement can be built on another. An unknown device
+            name fails endpoint creation rather than silently falling back.
+
+        Returns
+        -------
+        Endpoint
+            The new endpoint
+        """
+        self.continuous_ucx_progress()
+
+        ucx_ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+            self.worker,
+            address,
+            endpoint_error_handling,
+            local_device,
+        )
+        if not self.progress_mode.startswith("thread"):
+            self.worker.progress()
+
+        ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
+
+        logger.debug(
+            "create_endpoint_with_device() client: %s, error handling: %s, "
+            "local device: %s"
+            % (hex(ep._ep.handle), endpoint_error_handling, local_device)
+        )
+
+        return ep
+
+    async def create_endpoint_from_worker_address_on_path(
+        self,
+        address,
+        local_device_index,
+        remote_device_index,
+        *,
+        endpoint_error_handling=True,
+    ):
+        """Create an endpoint on one path: both ends, neither optional.
+
+        Every lane of the endpoint is selected on that pair of devices, and
+        creation fails where the pair affords none rather than selecting
+        elsewhere.
+
+        Parameters
+        ----------
+        address: UCXAddress
+        local_device_index: int
+            `index` of a local device, from `get_worker_devices()`.
+        remote_device_index: int
+            `index` of a peer device, from `query_address_devices(address)` over
+            this same address, and valid for that address alone.
+        endpoint_error_handling: boolean, optional
+            As in `create_endpoint_from_worker_address`.
+
+        Returns
+        -------
+        Endpoint
+            The new endpoint
+        """
+        self.continuous_ucx_progress()
+
+        ucx_ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+            self.worker,
+            address,
+            endpoint_error_handling,
+            None,
+            remote_device_index=remote_device_index,
+            local_device_index=local_device_index,
+        )
+        if not self.progress_mode.startswith("thread"):
+            self.worker.progress()
+
+        ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
+
+        logger.debug(
+            "create_endpoint_on_path() client: %s, error handling: %s, "
+            "path: local device[%s] -> remote device[%s]"
+            % (
+                hex(ep._ep.handle),
+                endpoint_error_handling,
+                local_device_index,
+                remote_device_index,
+            )
         )
 
         return ep

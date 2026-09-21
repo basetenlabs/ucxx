@@ -70,6 +70,15 @@ class Endpoint:
         return self._ep is None or not self.alive
 
     @property
+    def transports(self):
+        """``(transport, device)`` for each lane this endpoint selected.
+
+        What UCX chose, not what was asked for, so it is the only way to tell
+        whether a ``local_device`` restriction or a path took effect.
+        """
+        return self._ep.transports
+
+    @property
     def ucp_endpoint(self):
         """The underlying UCP endpoint handle (ucp_ep_h) as a Python integer."""
         return self._ep.handle
@@ -166,7 +175,7 @@ class Endpoint:
                 await asyncio.sleep(0)
                 self.abort(period=period, max_attempts=max_attempts)
 
-    async def am_send(self, buffer):
+    async def am_send(self, buffer, receiver_callback_info=None):
         """Send `buffer` to connected peer via active messages.
 
         Parameters
@@ -174,6 +183,11 @@ class Endpoint:
         buffer: exposing the buffer protocol or array/cuda interface
             The buffer to send. Raise ValueError if buffer is smaller
             than nbytes.
+        receiver_callback_info: tuple(str, int), optional
+            `(owner, identifier)` of a receiver callback registered on the
+            peer's worker (see `register_am_receiver_callback`). When given,
+            the message is delivered to that callback instead of matching the
+            peer's `am_recv()`.
         """
         self._ep.raise_on_error()
         if self.closed:
@@ -195,7 +209,7 @@ class Endpoint:
         self._send_count += 1
 
         try:
-            request = self._ep.am_send(buffer)
+            request = self._ep.am_send(buffer, receiver_callback_info)
             return await request.wait()
         except UCXCanceled as e:
             # If self._ep has already been closed and destroyed, we reraise the
