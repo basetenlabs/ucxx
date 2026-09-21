@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: BSD-3-Clause
 
 
@@ -69,6 +69,15 @@ class Endpoint:
     def closed(self):
         """Is this endpoint closed?"""
         return self._ep is None or not self.alive
+
+    @property
+    def transports(self):
+        """``(transport, device)`` for each lane this endpoint selected.
+
+        What UCX chose, not what was asked for, so it is the only way to tell
+        whether a ``local_device`` restriction or a path took effect.
+        """
+        return self._ep.transports
 
     @property
     def ucp_endpoint(self):

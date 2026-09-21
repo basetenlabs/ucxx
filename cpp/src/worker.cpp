@@ -18,6 +18,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <ucxx/address.h>
 #include <ucxx/buffer.h>
 #include <ucxx/internal/request_am.h>
 #include <ucxx/request_am.h>
@@ -715,12 +716,115 @@ void Worker::excludeDevice(const std::string& deviceName)
   utils::ucsErrorThrow(ucp_worker_exclude_device(_handle, deviceName.c_str()));
 }
 
-std::shared_ptr<Address> Worker::getAddressWithDevices(
-  const std::vector<std::string>& deviceNames)
+std::shared_ptr<Address> Worker::getAddressWithDevices(const std::vector<std::string>& deviceNames)
 {
   auto worker  = std::dynamic_pointer_cast<Worker>(shared_from_this());
   auto address = ucxx::createAddressFromWorkerWithDevices(worker, deviceNames);
   return address;
+}
+
+std::vector<DeviceAttr> Worker::queryDevices()
+{
+  unsigned count = 0;
+  utils::ucsErrorThrow(ucp_worker_query_devices(_handle, nullptr, &count));
+
+  std::vector<ucp_worker_device_attr_t> raw(count);
+  // A device retired between the two calls shrinks `count`; one appearing makes
+  // the second call fail with UCS_ERR_BUFFER_TOO_SMALL rather than truncate.
+  if (count > 0) utils::ucsErrorThrow(ucp_worker_query_devices(_handle, raw.data(), &count));
+  raw.resize(count);
+
+  std::vector<DeviceAttr> devices;
+  devices.reserve(raw.size());
+  for (const auto& attr : raw) {
+    DeviceAttr device;
+    device.name      = attr.dev_name;
+    device.transport = attr.tl_name;
+    device.index     = attr.dev_index;
+    device.sysDevice = attr.sys_device;
+    device.bandwidth = attr.bandwidth;
+    device.latency   = attr.latency;
+    device.overhead  = attr.overhead;
+    device.numPaths  = attr.num_paths;
+    device.segSize   = attr.seg_size;
+    device.capFlags  = attr.cap_flags;
+    devices.push_back(std::move(device));
+  }
+  return devices;
+}
+
+std::vector<RemoteDeviceAttr> Worker::queryAddressDevices(std::shared_ptr<Address> address)
+{
+  if (address == nullptr || address->getHandle() == nullptr)
+    throw ucxx::Error("Address not initialized");
+
+  const ucp_address_t* handle = address->getHandle();
+  unsigned count              = 0;
+  utils::ucsErrorThrow(ucp_address_query_devices(_handle, handle, nullptr, &count));
+
+  std::vector<ucp_address_device_attr_t> raw(count);
+  if (count > 0)
+    utils::ucsErrorThrow(ucp_address_query_devices(_handle, handle, raw.data(), &count));
+  raw.resize(count);
+
+  std::vector<RemoteDeviceAttr> entries;
+  entries.reserve(raw.size());
+  for (const auto& attr : raw) {
+    RemoteDeviceAttr entry;
+    entry.index              = attr.dev_index;
+    entry.sysDevice          = attr.sys_dev;
+    entry.numPaths           = attr.num_paths;
+    entry.bandwidth          = attr.bandwidth;
+    entry.latency            = attr.latency;
+    entry.overhead           = attr.overhead;
+    entry.segSize            = attr.seg_size;
+    entry.flags              = attr.flags;
+    entry.reachableFromLocal = attr.reachable_dev_bitmap;
+    // `dev_addr` points into the packed address and is valid only while it is.
+    // A caller holding an entry cannot be held to keeping that blob alive, so the
+    // bytes are copied; a device address is tens of bytes.
+    const auto* bytes = static_cast<const uint8_t*>(attr.dev_addr);
+    if (bytes != nullptr) entry.deviceAddress.assign(bytes, bytes + attr.dev_addr_len);
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+std::vector<TransportEntry> Worker::queryEndpointTransports(uintptr_t ucpEndpointHandle)
+{
+  if (ucpEndpointHandle == 0) throw ucxx::Error("Endpoint handle not initialized");
+
+  // ucp_ep_query truncates to the array it is handed and reports only how many
+  // entries it filled, so a full array may mean there are more lanes. The bound
+  // it stops at, UCP_MAX_LANES, is not in the public API, so grow until a call
+  // comes back short. `entry_size` is what keeps UCX from writing fields past
+  // the end of the struct this was compiled against.
+  std::vector<ucp_transport_entry_t> raw(8);
+  unsigned filled = 0;
+  for (;;) {
+    ucp_ep_attr_t attr;
+    attr.field_mask             = UCP_EP_ATTR_FIELD_TRANSPORTS;
+    attr.transports.entries     = raw.data();
+    attr.transports.num_entries = static_cast<unsigned>(raw.size());
+    attr.transports.entry_size  = sizeof(ucp_transport_entry_t);
+    utils::ucsErrorThrow(
+      ucp_ep_query(reinterpret_cast<ucp_ep_h>(ucpEndpointHandle), &attr));
+
+    filled = attr.transports.num_entries;
+    if (filled < raw.size()) break;
+    raw.resize(raw.size() * 2);
+  }
+  raw.resize(filled);
+
+  std::vector<TransportEntry> transports;
+  transports.reserve(raw.size());
+  for (const auto& entry : raw) {
+    TransportEntry transport;
+    if (entry.transport_name != nullptr) transport.transport = entry.transport_name;
+    if (entry.device_name != nullptr) transport.device = entry.device_name;
+    transports.push_back(std::move(transport));
+  }
+  return transports;
 }
 
 std::shared_ptr<Endpoint> Worker::createEndpointFromHostname(std::string ipAddress,
@@ -741,11 +845,25 @@ std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddress(std::shared_pt
 }
 
 std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddressWithDevice(
-  std::shared_ptr<Address> address, bool endpointErrorHandling, const std::string& localDevice)
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  const std::string& localDevice)
 {
   auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
   auto endpoint = ucxx::createEndpointFromWorkerAddressWithDevice(
     worker, address, endpointErrorHandling, localDevice);
+  return endpoint;
+}
+
+std::shared_ptr<Endpoint> Worker::createEndpointFromWorkerAddressOnPath(
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  unsigned localDeviceIndex,
+  unsigned remoteDeviceIndex)
+{
+  auto worker   = std::dynamic_pointer_cast<Worker>(shared_from_this());
+  auto endpoint = ucxx::createEndpointFromWorkerAddressOnPath(
+    worker, address, endpointErrorHandling, localDeviceIndex, remoteDeviceIndex);
   return endpoint;
 }
 

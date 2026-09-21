@@ -4,6 +4,7 @@
  */
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -74,17 +75,18 @@ struct EndpointErrorCallbackContext {
 static ucp_err_handling_mode_t endpointErrorHandlingMode(uint64_t fieldMask)
 {
   static const bool failoverRequested = []() {
-    const char* env       = std::getenv("UCXX_ERROR_HANDLING_MODE");
-    const bool  requested = env != nullptr && std::string(env) == "failover";
+    const char* env      = std::getenv("UCXX_ERROR_HANDLING_MODE");
+    const bool requested = env != nullptr && std::string(env) == "failover";
     if (requested)
-      ucxx_info("UCXX_ERROR_HANDLING_MODE=failover: worker-address endpoints will use "
-                "UCP_ERR_HANDLING_MODE_FAILOVER (NIC/lane failover)");
+      ucxx_info(
+        "UCXX_ERROR_HANDLING_MODE=failover: worker-address endpoints will use "
+        "UCP_ERR_HANDLING_MODE_FAILOVER (NIC/lane failover)");
     return requested;
   }();
 
-  const bool isWorkerAddress = (fieldMask & UCP_EP_PARAM_FIELD_REMOTE_ADDRESS) &&
-                               !(fieldMask & (UCP_EP_PARAM_FIELD_SOCK_ADDR |
-                                              UCP_EP_PARAM_FIELD_CONN_REQUEST));
+  const bool isWorkerAddress =
+    (fieldMask & UCP_EP_PARAM_FIELD_REMOTE_ADDRESS) &&
+    !(fieldMask & (UCP_EP_PARAM_FIELD_SOCK_ADDR | UCP_EP_PARAM_FIELD_CONN_REQUEST));
 
   if (failoverRequested && isWorkerAddress) return UCP_ERR_HANDLING_MODE_FAILOVER;
   return UCP_ERR_HANDLING_MODE_PEER;
@@ -280,6 +282,36 @@ std::shared_ptr<Endpoint> createEndpointFromWorkerAddressWithDevice(
   return ep;
 }
 
+std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+  std::shared_ptr<Worker> worker,
+  std::shared_ptr<Address> address,
+  bool endpointErrorHandling,
+  unsigned localDeviceIndex,
+  unsigned remoteDeviceIndex)
+{
+  if (worker == nullptr || worker->getHandle() == nullptr)
+    throw ucxx::Error("Worker not initialized");
+  if (address == nullptr || address->getHandle() == nullptr || address->getLength() == 0)
+    throw ucxx::Error("Address not initialized");
+
+  // Both ends in one field, because they are one decision: UCX selects every
+  // lane on that pair and fails the creation where the pair affords none,
+  // instead of choosing a device the caller did not name. `remoteDeviceIndex`
+  // indexes the entries of the address in `params.address` and nothing else, so
+  // an index from another address names a different device or none at all.
+  ucp_ep_params_t params = {.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS |
+                                          UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                                          UCP_EP_PARAM_FIELD_ERR_HANDLER |
+                                          UCP_EP_PARAM_FIELD_PATH,
+                            .address = address->getHandle()};
+  params.path.local_dev_index  = localDeviceIndex;
+  params.path.remote_dev_index = remoteDeviceIndex;
+
+  auto ep = std::shared_ptr<Endpoint>(new Endpoint(worker, endpointErrorHandling));
+  ep->create(&params);
+  return ep;
+}
+
 std::shared_ptr<Endpoint> createEndpointFromWorkerAddress(std::shared_ptr<Worker> worker,
                                                           std::shared_ptr<Address> address,
                                                           bool endpointErrorHandling)
@@ -423,6 +455,11 @@ void Endpoint::closeBlocking(uint64_t period, uint64_t maxAttempts)
 }
 
 ucp_ep_h Endpoint::getHandle() { return _handle; }
+
+std::vector<TransportEntry> Endpoint::getTransports()
+{
+  return getWorker()->queryEndpointTransports(reinterpret_cast<uintptr_t>(_handle));
+}
 
 bool Endpoint::isAlive() const
 {

@@ -7,6 +7,7 @@
 #include <netdb.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -220,6 +221,30 @@ class Endpoint : public Component {
     const std::string& localDevice);
 
   /**
+   * @brief Create an endpoint on one path: both ends, neither optional.
+   *
+   * Every lane of the endpoint is selected on that pair of devices, and where
+   * the pair affords none the creation fails rather than selecting elsewhere.
+   * `localDeviceIndex` is a `dev_index` from the worker's device query;
+   * `remoteDeviceIndex` is one from the address query over `address` itself,
+   * and is valid inside that blob alone.
+   *
+   * @param[in] worker                parent worker from which to create the endpoint.
+   * @param[in] address               address of the remote UCX worker
+   * @param[in] endpointErrorHandling whether to enable endpoint error handling.
+   * @param[in] localDeviceIndex      local end of the path
+   * @param[in] remoteDeviceIndex     peer end of the path, within `address`
+   *
+   * @returns The `shared_ptr<ucxx::Endpoint>` object
+   */
+  friend std::shared_ptr<Endpoint> createEndpointFromWorkerAddressOnPath(
+    std::shared_ptr<Worker> worker,
+    std::shared_ptr<Address> address,
+    bool endpointErrorHandling,
+    unsigned localDeviceIndex,
+    unsigned remoteDeviceIndex);
+
+  /**
    * @brief Get the underlying `ucp_ep_h` handle.
    *
    * Lifetime of the `ucp_ep_h` handle is managed by the `ucxx::Endpoint` object and its
@@ -235,6 +260,19 @@ class Endpoint : public Component {
    * @returns The underlying `ucp_ep_h` handle.
    */
   [[nodiscard]] ucp_ep_h getHandle();
+
+  /**
+   * @brief Report the transport and device of each lane this endpoint selected.
+   *
+   * What UCX actually chose, which is not necessarily what was asked for: an
+   * endpoint created with a `localDevice` or `remoteDevice` restriction is only
+   * known to have honoured it by reading it back from here.
+   *
+   * @throws ucxx::Error if the endpoint's attributes cannot be queried.
+   *
+   * @returns One `TransportEntry` per lane, in UCX's own order.
+   */
+  [[nodiscard]] std::vector<TransportEntry> getTransports();
 
   /**
    * @brief Check whether the endpoint is still alive.

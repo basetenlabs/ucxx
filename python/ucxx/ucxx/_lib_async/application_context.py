@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
@@ -207,6 +207,30 @@ class ApplicationContext:
     def exclude_device(self, device_name):
         """Retire a local NIC from future lane selection on this worker."""
         return self.worker.exclude_device(device_name)
+
+    def query_devices(self):
+        """Transport resources this worker can select lanes from.
+
+        One dict per transport resource; ``name`` is what ``local_device`` takes.
+        """
+        return self.worker.query_devices()
+
+    def query_address_devices(self, address):
+        """Devices a peer's worker address advertises.
+
+        One dict per address entry. ``index`` is what ``remote_device_index`` takes for
+        this same address, and ``reachable_from_local`` is a bitmap over this
+        worker's ``query_devices()`` indices.
+        """
+        return self.worker.query_address_devices(address)
+
+    def query_endpoint_transports(self, ucp_endpoint):
+        """``(transport, device)`` for each lane of an endpoint on this worker.
+
+        Takes a raw ``ucp_ep_h``, so it reaches the endpoint a peer's wireup
+        built, which ucxx never created and has no ``Endpoint`` object for.
+        """
+        return self.worker.query_endpoint_transports(ucp_endpoint)
 
     def worker_address_with_devices(self, device_names):
         """Worker address listing only ``device_names``.
@@ -488,10 +512,15 @@ class ApplicationContext:
     async def create_endpoint_from_worker_address_with_device(
         self,
         address,
+        *,
         endpoint_error_handling=True,
         local_device=None,
     ):
-        """Create an endpoint pinned to one local device.
+        """Create an endpoint pinned to one local device, this end only.
+
+        Keyword-only past `address`: the device used to be the second positional
+        parameter in callers' minds, which silently bound it to
+        `endpoint_error_handling` and left the endpoint unpinned.
 
         Parameters
         ----------
@@ -526,8 +555,67 @@ class ApplicationContext:
         ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
 
         logger.debug(
-            "create_endpoint_with_device() client: %s, error handling: %s, device: %s"
+            "create_endpoint_with_device() client: %s, error handling: %s, "
+            "local device: %s"
             % (hex(ep._ep.handle), endpoint_error_handling, local_device)
+        )
+
+        return ep
+
+    async def create_endpoint_from_worker_address_on_path(
+        self,
+        address,
+        local_device_index,
+        remote_device_index,
+        *,
+        endpoint_error_handling=True,
+    ):
+        """Create an endpoint on one path: both ends, neither optional.
+
+        Every lane of the endpoint is selected on that pair of devices, and
+        creation fails where the pair affords none rather than selecting
+        elsewhere.
+
+        Parameters
+        ----------
+        address: UCXAddress
+        local_device_index: int
+            `index` of a local device, from `get_worker_devices()`.
+        remote_device_index: int
+            `index` of a peer device, from `query_address_devices(address)` over
+            this same address, and valid for that address alone.
+        endpoint_error_handling: boolean, optional
+            As in `create_endpoint_from_worker_address`.
+
+        Returns
+        -------
+        Endpoint
+            The new endpoint
+        """
+        self.continuous_ucx_progress()
+
+        ucx_ep = ucx_api.UCXEndpoint.create_from_worker_address_with_device(
+            self.worker,
+            address,
+            endpoint_error_handling,
+            None,
+            remote_device_index=remote_device_index,
+            local_device_index=local_device_index,
+        )
+        if not self.progress_mode.startswith("thread"):
+            self.worker.progress()
+
+        ep = Endpoint(endpoint=ucx_ep, ctx=self, tags=None)
+
+        logger.debug(
+            "create_endpoint_on_path() client: %s, error handling: %s, "
+            "path: local device[%s] -> remote device[%s]"
+            % (
+                hex(ep._ep.handle),
+                endpoint_error_handling,
+                local_device_index,
+                remote_device_index,
+            )
         )
 
         return ep

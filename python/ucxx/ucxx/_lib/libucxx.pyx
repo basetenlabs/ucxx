@@ -880,6 +880,87 @@ cdef class UCXWorker():
         with nogil:
             self._worker.get().excludeDevice(name)
 
+    def query_devices(self) -> list:
+        """Transport resources this worker can select lanes from.
+
+        One dict per transport resource, so a device carrying several transports
+        appears once per transport with the same ``index``. ``name`` is the
+        spelling ``local_device`` takes; a device retired by ``exclude_device``
+        is absent.
+        """
+        cdef vector[DeviceAttr] devices
+
+        with nogil:
+            devices = self._worker.get().queryDevices()
+
+        result = []
+        for i in range(devices.size()):
+            result.append({
+                "name": devices[i].name.decode("utf-8"),
+                "transport": devices[i].transport.decode("utf-8"),
+                "index": devices[i].index,
+                "sys_device": devices[i].sysDevice,
+                "bandwidth": devices[i].bandwidth,
+                "latency": devices[i].latency,
+                "overhead": devices[i].overhead,
+                "num_paths": devices[i].numPaths,
+                "seg_size": devices[i].segSize,
+                "cap_flags": devices[i].capFlags,
+            })
+        return result
+
+    def query_address_devices(self, UCXAddress address) -> list:
+        """Devices a peer's worker address advertises.
+
+        One dict per address entry, in advertised order. ``index`` is what
+        ``remote_device_index`` takes when creating an endpoint to *this* address, and
+        means nothing for any other. ``reachable_from_local`` is a bitmap over
+        ``query_devices()`` indices, so it is a fact about this worker.
+        """
+        cdef shared_ptr[Address] ucxx_address = address._address
+        cdef vector[RemoteDeviceAttr] entries
+
+        with nogil:
+            entries = self._worker.get().queryAddressDevices(ucxx_address)
+
+        result = []
+        for i in range(entries.size()):
+            result.append({
+                "index": entries[i].index,
+                "sys_device": entries[i].sysDevice,
+                "num_paths": entries[i].numPaths,
+                "bandwidth": entries[i].bandwidth,
+                "latency": entries[i].latency,
+                "overhead": entries[i].overhead,
+                "seg_size": entries[i].segSize,
+                "flags": entries[i].flags,
+                "reachable_from_local": entries[i].reachableFromLocal,
+                "device_address": bytes(entries[i].deviceAddress),
+            })
+        return result
+
+    def query_endpoint_transports(self, uintptr_t ucp_endpoint) -> list:
+        """``(transport, device)`` for each lane of any endpoint on this worker.
+
+        Takes a raw ``ucp_ep_h``, so it reaches the endpoint a peer's wireup
+        built, which ucxx never created and therefore has no ``UCXEndpoint``
+        for. That endpoint carries the peer's replies and anything it pulls, so
+        reading it back is how the port a request was answered on is observed
+        rather than assumed.
+        """
+        cdef vector[TransportEntry] entries
+
+        with nogil:
+            entries = self._worker.get().queryEndpointTransports(ucp_endpoint)
+
+        return [
+            (
+                entries[i].transport.decode("utf-8"),
+                entries[i].device.decode("utf-8"),
+            )
+            for i in range(entries.size())
+        ]
+
     @property
     def enable_delayed_submission(self) -> bool:
         return self._enable_delayed_submission
@@ -931,10 +1012,13 @@ cdef class UCXWorker():
             self,
             UCXAddress address,
             bint endpoint_error_handling,
-            local_device
+            local_device,
+            remote_device_index=None,
+            local_device_index=None
     ) -> UCXEndpoint:
         return UCXEndpoint.create_from_worker_address_with_device(
-            self, address, endpoint_error_handling, local_device
+            self, address, endpoint_error_handling, local_device,
+            remote_device_index, local_device_index
         )
 
     def init_blocking_progress_mode(self) -> None:
@@ -1792,12 +1876,20 @@ cdef class UCXEndpoint():
             UCXWorker worker,
             UCXAddress address,
             bint endpoint_error_handling,
-            local_device
+            local_device,
+            remote_device_index=None,
+            local_device_index=None
     ) -> UCXEndpoint:
-        """Create an endpoint pinned to one local device.
+        """Create an endpoint pinned to one local device, or to one whole path.
 
         Separate from create_from_worker_address so the existing entry point,
-        and the C++ symbol behind it, are left untouched.
+        and the C++ symbol behind it, are left untouched. Passing both
+        ``local_device_index`` and ``remote_device_index`` names the whole path
+        and every lane is selected on that pair; passing neither names this end
+        alone, by ``local_device``, and lane selection picks the peer's device
+        as it always did. The remote index comes from
+        ``UCXWorker.query_address_devices(address)`` over this same address and
+        is valid for it alone.
         """
         cdef UCXEndpoint endpoint = UCXEndpoint.__new__(UCXEndpoint)
         cdef shared_ptr[Context] ucxx_context
@@ -1805,6 +1897,15 @@ cdef class UCXEndpoint():
         # Encode before the nogil block, which must touch no Python objects.
         cdef string ucxx_local_device = (
             local_device.encode("utf-8") if local_device else b""
+        )
+        cdef bint on_path = (
+            remote_device_index is not None and local_device_index is not None
+        )
+        cdef unsigned int ucxx_remote_index = (
+            remote_device_index if remote_device_index is not None else 0
+        )
+        cdef unsigned int ucxx_local_index = (
+            local_device_index if local_device_index is not None else 0
         )
 
         endpoint._enable_python_future = worker.enable_python_future
@@ -1816,11 +1917,21 @@ cdef class UCXEndpoint():
 
             endpoint._context_feature_flags = ucxx_context.get().getFeatureFlags()
             endpoint._cuda_support = ucxx_context.get().hasCudaSupport()
-            endpoint._endpoint = (
-                worker._worker.get().createEndpointFromWorkerAddressWithDevice(
-                    ucxx_address, endpoint_error_handling, ucxx_local_device
+            # Two C++ entry points, one per shape: a whole path, or this end
+            # alone. There is none that takes half a path.
+            if on_path:
+                endpoint._endpoint = (
+                    worker._worker.get().createEndpointFromWorkerAddressOnPath(
+                        ucxx_address, endpoint_error_handling, ucxx_local_index,
+                        ucxx_remote_index
+                    )
                 )
-            )
+            else:
+                endpoint._endpoint = (
+                    worker._worker.get().createEndpointFromWorkerAddressWithDevice(
+                        ucxx_address, endpoint_error_handling, ucxx_local_device
+                    )
+                )
 
         return endpoint
 
@@ -1858,6 +1969,27 @@ cdef class UCXEndpoint():
             handle = self._endpoint.get().getHandle()
 
         return int(<uintptr_t>handle)
+
+    @property
+    def transports(self) -> list:
+        """``(transport, device)`` for each lane this endpoint selected.
+
+        What UCX chose, not what was asked for: an endpoint created with a
+        a ``local_device`` or a path is only known to have honoured it
+        by reading it back from here.
+        """
+        cdef vector[TransportEntry] entries
+
+        with nogil:
+            entries = self._endpoint.get().getTransports()
+
+        return [
+            (
+                entries[i].transport.decode("utf-8"),
+                entries[i].device.decode("utf-8"),
+            )
+            for i in range(entries.size())
+        ]
 
     @property
     def ucxx_ptr(self) -> int:
