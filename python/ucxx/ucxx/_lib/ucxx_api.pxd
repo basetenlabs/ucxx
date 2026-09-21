@@ -94,11 +94,6 @@ cdef extern from "ucp/api/ucp.h" nogil:
                          unsigned *release_number)
 
 
-cdef extern from "rmm/device_buffer.hpp" namespace "rmm" nogil:
-    cdef cppclass device_buffer:
-        pass
-
-
 cdef extern from "<ucxx/python/exception.h>" namespace "ucxx::python" nogil:
     cdef PyObject* UCXXError
 
@@ -151,7 +146,6 @@ cdef extern from "<ucxx/python/api.h>" namespace "ucxx::python" nogil:
 cdef extern from "<ucxx/buffer.h>" namespace "ucxx" nogil:
     cdef enum class BufferType:
         Host
-        RMM
         CCCL
         External
         Invalid
@@ -167,13 +161,6 @@ cdef extern from "<ucxx/buffer.h>" namespace "ucxx" nogil:
         BufferType getType()
         size_t getSize()
         void* release() except +raise_py_error
-        void* data() except +raise_py_error
-
-    cdef cppclass RMMBuffer:
-        RMMBuffer(const size_t size_t) except +raise_py_error
-        BufferType getType()
-        size_t getSize()
-        unique_ptr[device_buffer] release() except +raise_py_error
         void* data() except +raise_py_error
 
 cdef extern from "<ucxx/buffer.h>" namespace "ucxx" nogil:
@@ -448,7 +435,6 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         ucp_address_t* getHandle()
         size_t getLength()
         string_view getStringView()
-        string getString()
 
     cdef cppclass Request(Component):
         cpp_bool isCompleted()

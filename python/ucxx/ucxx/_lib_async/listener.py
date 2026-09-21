@@ -6,6 +6,7 @@ import inspect
 import logging
 import os
 import threading
+import traceback
 import weakref
 
 import ucxx._lib.libucxx as ucx_api
@@ -16,6 +17,16 @@ from .exchange_peer_info import exchange_peer_info
 from .utils import hash64bits
 
 logger = logging.getLogger("ucx")
+
+
+def _log_exception(message):
+    """Log the current exception without retaining traceback frame references."""
+    logger.error(
+        "%s\n%s",
+        message,
+        traceback.format_exc().rstrip(),
+        stacklevel=2,
+    )
 
 
 class ActiveClients:
@@ -149,6 +160,7 @@ async def _listener_handler_coroutine(
     #  4) Setup control receive callback
     #  5) Execute the listener's callback function
     active_clients.inc(ident)
+    endpoint = None
     ep = None
     try:
         endpoint = conn_request
@@ -186,22 +198,22 @@ async def _listener_handler_coroutine(
             )
         )
 
-        # Removing references here to avoid delayed clean up
-        del ctx
-
         # Finally, we call `func`
         if inspect.iscoroutinefunction(func):
             try:
                 await func(ep)
             except Exception:
-                logger.exception("Uncaught listener callback error")
+                _log_exception("Uncaught listener callback error")
         else:
             func(ep)
     except Exception:
-        logger.exception("Unexpected error in listener handler coroutine")
+        _log_exception("Unexpected error in listener handler coroutine")
     finally:
+        ctx = None
+        endpoint = None
+        conn_request = None
+        ep = None
         active_clients.dec(ident)
-        del ep
 
 
 def _listener_handler(

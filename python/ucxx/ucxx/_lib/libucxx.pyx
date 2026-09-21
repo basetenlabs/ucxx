@@ -7,7 +7,6 @@ import enum
 import functools
 from pickle import PickleBuffer
 import logging
-import warnings
 import weakref
 from typing import Optional
 
@@ -119,8 +118,6 @@ cdef extern from *:
     PyObject* _ucxx_external_buffer_owner(Buffer* buffer)
 
 import numpy as np
-
-from rmm.pylibrmm.device_buffer cimport DeviceBuffer
 
 from .arr cimport Array
 from .ucxx_api cimport *
@@ -268,21 +265,11 @@ cdef class HostBufferAdapter:
         free(self._ptr)
 
 
-def _get_rmm_buffer(uintptr_t recv_buffer_ptr):
-    cdef RMMBuffer* rmm_buffer = <RMMBuffer*>recv_buffer_ptr
-    return DeviceBuffer.c_from_unique_ptr(move(rmm_buffer.release()))
-
-
 def _get_host_buffer(uintptr_t recv_buffer_ptr):
     cdef HostBuffer* host_buffer = <HostBuffer*>recv_buffer_ptr
     return np.asarray(HostBufferAdapter._from_host_buffer(host_buffer))
 
 
-cdef shared_ptr[Buffer] _rmm_am_allocator(size_t length) noexcept nogil:
-    cdef shared_ptr[RMMBuffer] rmm_buffer = make_shared[RMMBuffer](length)
-    return dynamic_pointer_cast[Buffer, RMMBuffer](rmm_buffer)
-
-# Unlike RMM which has a Python DeviceBuffer class (from the rmm package),
 # CCCL has no Python buffer equivalent. This wrapper provides __cuda_array_interface__
 # for interoperability with CuPy/cuDF without requiring an external CCCL Python package.
 cdef class CCCLBufferWrapper:
@@ -525,15 +512,6 @@ cdef class UCXConfig():
             for item in config_map
         }
 
-    def get(self) -> dict:
-        warnings.warn(
-            "UCXConfig.get() is deprecated and will soon be removed, "
-            "use the UCXConfig.config property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.config
-
 
 cdef class UCXContext():
     """Python representation of `ucp_context_h`
@@ -636,15 +614,6 @@ cdef class UCXContext():
 
         return info.decode("utf-8")
 
-    cpdef dict get_config(self):
-        warnings.warn(
-            "UCXContext.get_config() is deprecated and will soon be removed, "
-            "use the UCXContext.config property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.config
-
 
 cdef class UCXAddress():
     def __init__(self) -> None:
@@ -709,18 +678,6 @@ cdef class UCXAddress():
             address._string = address._address.get().getStringView()
 
         return address
-
-    # For old UCX-Py API compatibility
-    @classmethod
-    def from_worker(cls, UCXWorker worker) -> UCXAddress:
-        warnings.warn(
-            "UCXAddress.from_worker() is deprecated and will soon be removed, "
-            "use UCXAddress.create_from_worker() instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-
-        return cls.create_from_worker(worker)
 
     @property
     def address(self) -> int:
@@ -789,7 +746,6 @@ cdef class UCXWorker():
     ) -> None:
         cdef bint ucxx_enable_delayed_submission = enable_delayed_submission
         cdef bint ucxx_enable_python_future = enable_python_future
-        cdef AmAllocatorType rmm_am_allocator
         cdef AmAllocatorType cccl_am_allocator
 
         self._context_feature_flags = <uint64_t>(context.feature_flags)
@@ -807,22 +763,7 @@ cdef class UCXWorker():
             self._enable_python_future = self._worker.get().isFutureEnabled()
 
             if self._context_feature_flags & UCP_FEATURE_AM:
-                if self._worker.get().getCudaBufferType() == BufferType.RMM:
-                    with gil:
-                        warnings.warn(
-                            "RMM CUDA buffer support is deprecated and "
-                            "will be removed in a future release. Use "
-                            "CCCL buffers instead (set "
-                            "UCXX_ENABLE_CCCL=ON and "
-                            "UCXX_ENABLE_RMM=OFF).",
-                            FutureWarning,
-                            stacklevel=2,
-                        )
-                    rmm_am_allocator = <AmAllocatorType>(&_rmm_am_allocator)
-                    self._worker.get().registerAmAllocator(
-                        UCS_MEMORY_TYPE_CUDA, rmm_am_allocator
-                    )
-                elif self._worker.get().getCudaBufferType() == BufferType.CCCL:
+                if self._worker.get().getCudaBufferType() == BufferType.CCCL:
                     cccl_am_allocator = <AmAllocatorType>(&_cccl_am_allocator)
                     self._worker.get().registerAmAllocator(
                         UCS_MEMORY_TYPE_CUDA, cccl_am_allocator
@@ -971,25 +912,14 @@ cdef class UCXWorker():
 
     @property
     def cuda_buffer_type(self) -> str:
-        """Return the preferred CUDA buffer type ('rmm', 'cccl', or 'none')."""
+        """Return the preferred CUDA buffer type ('cccl', or 'none')."""
         cdef BufferType bt
         with nogil:
             bt = self._worker.get().getCudaBufferType()
-        if bt == BufferType.RMM:
-            return "rmm"
-        elif bt == BufferType.CCCL:
+        if bt == BufferType.CCCL:
             return "cccl"
         else:
             return "none"
-
-    def get_address(self) -> UCXAddress:
-        warnings.warn(
-            "UCXWorker.get_address() is deprecated and will soon be removed, "
-            "use the UCXWorker.address property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.address
 
     def create_endpoint_from_hostname(
             self,
@@ -1291,24 +1221,6 @@ cdef class UCXWorker():
         with nogil:
             self._worker.get().clearFuturesPool()
 
-    def is_delayed_submission_enabled(self) -> bool:
-        warnings.warn(
-            "UCXWorker.is_delayed_submission_enabled() is deprecated and will soon "
-            "be removed, use the UCXWorker.enable_delayed_submission property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.enable_delayed_submission
-
-    def is_python_future_enabled(self) -> bool:
-        warnings.warn(
-            "UCXWorker.is_python_future_enabled() is deprecated and will soon be "
-            "removed, use the UCXWorker.enable_python_future property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.enable_python_future
-
     def tag_recv(
         self,
         Array arr,
@@ -1430,8 +1342,6 @@ cdef class UCXRequest():
         # If buf == NULL, it's not allocated by the request but rather the user
         if buf == NULL:
             return None
-        elif bufType == BufferType.RMM:
-            return _get_rmm_buffer(<uintptr_t><void*>buf.get())
         elif bufType == BufferType.CCCL:
             return _get_cccl_buffer(buf)
         elif bufType == BufferType.Host:
@@ -1447,24 +1357,6 @@ cdef class UCXRequest():
                 return None
             return <object>owner_ptr
 
-    def is_completed(self) -> bool:
-        warnings.warn(
-            "UCXRequest.is_completed() is deprecated and will soon be removed, "
-            "use the UCXRequest.completed property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.completed
-
-    def get_status(self) -> ucs_status_t:
-        warnings.warn(
-            "UCXRequest.get_status() is deprecated and will soon be removed, "
-            "use the UCXRequest.status property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.status
-
     def check_error(self) -> None:
         with nogil:
             self._request.get().checkError()
@@ -1475,29 +1367,11 @@ cdef class UCXRequest():
                 return self.check_error()
             await asyncio.sleep(0)
 
-    def get_future(self) -> object:
-        warnings.warn(
-            "UCXRequest.get_future() is deprecated and will soon be removed, "
-            "use the UCXRequest.future property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.future
-
     async def wait(self) -> None:
         if self._enable_python_future:
             await self.future
         else:
             await self.wait_yield()
-
-    def get_recv_buffer(self) -> None|np.ndarray|DeviceBuffer:
-        warnings.warn(
-            "UCXRequest.get_recv_buffer() is deprecated and will soon be removed, "
-            "use the UCXRequest.recv_buffer property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.recv_buffer
 
 
 cdef class UCXBufferRequest:
@@ -1521,7 +1395,7 @@ cdef class UCXBufferRequest:
         )
 
     @property
-    def py_buffer(self) -> None|np.ndarray|DeviceBuffer:
+    def py_buffer(self) -> object:
         cdef shared_ptr[Buffer] buf
         cdef BufferType bufType
 
@@ -1532,8 +1406,6 @@ cdef class UCXBufferRequest:
         # If buf == NULL, it holds a header
         if buf == NULL:
             return None
-        elif bufType == BufferType.RMM:
-            return _get_rmm_buffer(<uintptr_t><void*>buf.get())
         elif bufType == BufferType.CCCL:
             return _get_cccl_buffer(buf)
         elif bufType == BufferType.Host:
@@ -1548,24 +1420,6 @@ cdef class UCXBufferRequest:
             if owner_ptr == NULL:
                 return None
             return <object>owner_ptr
-
-    def get_request(self) -> UCXRequest:
-        warnings.warn(
-            "UCXBufferRequest.get_request() is deprecated and will soon be removed, "
-            "use the UCXBufferRequest.request property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.request
-
-    def get_py_buffer(self) -> None|np.ndarray|DeviceBuffer:
-        warnings.warn(
-            "UCXBufferRequest.get_py_buffer() is deprecated and will soon be removed, "
-            "use the UCXBufferRequest.py_buffer property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.py_buffer
 
 
 cdef class UCXBufferRequests:
@@ -1645,7 +1499,7 @@ cdef class UCXBufferRequests:
         return <object>future_ptr
 
     @property
-    def py_buffers(self) -> tuple[None|np.ndarray|DeviceBuffer, ...]:
+    def py_buffers(self) -> tuple[object, ...]:
         if not self.completed:
             raise RuntimeError("Some requests are not completed yet")
 
@@ -1660,36 +1514,9 @@ cdef class UCXBufferRequests:
         self._populate_requests()
         return self._requests
 
-    def is_completed(self) -> bool:
-        warnings.warn(
-            "UCXBufferRequests.is_completed() is deprecated and will soon be removed, "
-            "use the UCXBufferRequests.completed property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.completed
-
-    def is_completed_all(self) -> bool:
-        warnings.warn(
-            "UCXBufferRequests.is_completed_all() is deprecated and will soon be "
-            "removed, use the UCXBufferRequests.all_completed property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.all_completed
-
     def check_error(self) -> None:
         with nogil:
             self._ucxx_request_tag_multi.get().checkError()
-
-    def get_status(self) -> ucs_status_t:
-        warnings.warn(
-            "UCXBufferRequests.get_status() is deprecated and will soon be removed, "
-            "use the UCXBufferRequests.status property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.status
 
     async def wait_yield(self) -> None:
         while True:
@@ -1699,38 +1526,11 @@ cdef class UCXBufferRequests:
                 return
             await asyncio.sleep(0)
 
-    def get_future(self) -> object:
-        warnings.warn(
-            "UCXBufferRequests.get_future() is deprecated and will soon be removed, "
-            "use the UCXBufferRequests.future property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.future
-
     async def wait(self) -> None:
         if self._enable_python_future:
             await self.future
         else:
             await self.wait_yield()
-
-    def get_requests(self) -> tuple[UCXRequest, ...]:
-        warnings.warn(
-            "UCXBufferRequests.get_requests() is deprecated and will soon be removed, "
-            "use the UCXBufferRequests.requests property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.requests
-
-    def get_py_buffers(self) -> tuple[None|np.ndarray|DeviceBuffer, ...]:
-        warnings.warn(
-            "UCXBufferRequests.get_py_buffers() is deprecated and will soon be "
-            "removed, use the UCXBufferRequests.py_buffers property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.py_buffers
 
 
 cdef void _am_receiver_callback(
@@ -2320,15 +2120,6 @@ cdef class UCXEndpoint():
             <uintptr_t><void*>&ucxx_buffer_requests, self._enable_python_future,
         )
 
-    def is_alive(self) -> bool:
-        warnings.warn(
-            "UCXEndpoint.is_alive() is deprecated and will soon be removed, "
-            "use the UCXEndpoint.alive property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.alive
-
     def raise_on_error(self) -> None:
         with nogil:
             self._endpoint.get().raiseOnError()
@@ -2484,15 +2275,6 @@ cdef class UCXListener():
         return UCXEndpoint.create_from_conn_request(
             self, conn_request, endpoint_error_handling,
         )
-
-    def is_python_future_enabled(self) -> bool:
-        warnings.warn(
-            "UCXListener.is_python_future_enabled() is deprecated and will soon be "
-            "removed, use the UCXListener.enable_python_future property instead",
-            FutureWarning,
-            stacklevel=2,
-        )
-        return self.enable_python_future
 
 
 def get_current_options() -> dict:

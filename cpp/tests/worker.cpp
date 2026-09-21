@@ -2,8 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES.
  * SPDX-License-Identifier: BSD-3-Clause
  */
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -11,8 +15,8 @@
 #include <gtest/gtest.h>
 
 #include <ucxx/api.h>
-
-#include <type_traits>
+#include <ucxx/delayed_submission.h>
+#include <ucxx/worker_progress_thread.h>
 
 #include "include/utils.h"
 
@@ -169,6 +173,56 @@ class WorkerGenericCallbackSingleTest : public WorkerProgressTest {};
 
 TEST_F(WorkerTest, HandleIsValid) { ASSERT_TRUE(_worker->getHandle() != nullptr); }
 
+TEST(WorkerProgressThreadTest, StopDuringStartCallbackAfterPostCallbackTimeout)
+{
+  constexpr uint64_t stopCallbackTimeoutNs{1};
+  constexpr uint64_t stopSignalIntervalNs{0};
+  constexpr int directStopSignalCount{3};
+
+  std::mutex m;
+  std::condition_variable cv;
+  bool startCallbackEntered{false};
+  bool releaseStartCallback{false};
+  int signalCount{0};
+
+  auto delayedSubmissions = std::make_shared<ucxx::DelayedSubmissionCollection>(false);
+  ucxx::WorkerProgressThread progressThread(
+    false,
+    []() { return false; },
+    [&]() {
+      std::lock_guard<std::mutex> lock(m);
+      // With periodic stop signals disabled, the third signal is the direct-stop
+      // fallback after pre and post callback waits have timed out.
+      if (++signalCount == directStopSignalCount) {
+        releaseStartCallback = true;
+        cv.notify_all();
+      }
+    },
+    []() {},
+    [&](void*) {
+      std::unique_lock<std::mutex> lock(m);
+      startCallbackEntered = true;
+      cv.notify_all();
+      cv.wait(lock, [&]() { return releaseStartCallback; });
+    },
+    nullptr,
+    delayedSubmissions);
+
+  {
+    std::unique_lock<std::mutex> lock(m);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(1), [&]() { return startCallbackEntered; }));
+  }
+
+  progressThread.stop(
+    ucxx::WorkerProgressThread::StopConfig{stopCallbackTimeoutNs, stopSignalIntervalNs});
+
+  {
+    std::lock_guard<std::mutex> lock(m);
+    EXPECT_GE(signalCount, directStopSignalCount);
+  }
+  EXPECT_FALSE(progressThread.isRunning());
+}
+
 TEST_F(WorkerTest, QueryAttributes)
 {
   auto attrs = _worker->queryAttributes();
@@ -296,7 +350,8 @@ TEST_F(WorkerTest, TagProbeRemoveWithMessage)
 
   // Send a message
   std::vector<int> buf{123};
-  auto send_req = ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
+  std::shared_ptr<ucxx::Request> send_req =
+    ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
 
   // Progress until message is sent
   while (!send_req->isCompleted()) {
@@ -325,7 +380,7 @@ TEST_F(WorkerTest, TagProbeRemoveWithMessage)
 
   // Test receiving with the message handle
   std::vector<int> recv_buf(1);
-  auto recv_req = _worker->tagRecvWithHandle(recv_buf.data(), probe2);
+  std::shared_ptr<ucxx::Request> recv_req = _worker->tagRecvWithHandle(recv_buf.data(), probe2);
 
   // Progress until message is received
   while (!recv_req->isCompleted()) {
@@ -342,7 +397,8 @@ TEST_F(WorkerTest, TagProbeUnconsumedWarning)
 
   // Send a message
   std::vector<int> buf{123};
-  auto send_req = ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
+  std::shared_ptr<ucxx::Request> send_req =
+    ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
 
   // Progress until message is sent
   while (!send_req->isCompleted()) {
@@ -392,7 +448,8 @@ TEST_F(WorkerTest, TagProbeReleaseHandle)
 
   // Send a message
   std::vector<int> buf{123};
-  auto send_req = ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
+  std::shared_ptr<ucxx::Request> send_req =
+    ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
 
   // Progress until message is sent
   while (!send_req->isCompleted()) {
@@ -431,7 +488,8 @@ TEST_F(WorkerTest, TagProbeConsumeHandle)
 
   // Send a message
   std::vector<int> buf{123};
-  auto send_req = ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
+  std::shared_ptr<ucxx::Request> send_req =
+    ep->tagSend(buf.data(), buf.size() * sizeof(int), ucxx::Tag{0});
 
   // Progress until message is sent
   while (!send_req->isCompleted()) {
@@ -454,7 +512,7 @@ TEST_F(WorkerTest, TagProbeConsumeHandle)
 
     // Actually use the handle via tagRecvWithHandle to consume it properly
     std::vector<int> recv_buf(1);
-    auto recv_req = _worker->tagRecvWithHandle(recv_buf.data(), probe);
+    std::shared_ptr<ucxx::Request> recv_req = _worker->tagRecvWithHandle(recv_buf.data(), probe);
 
     // Progress until message is received
     while (!recv_req->isCompleted()) {
@@ -856,183 +914,6 @@ INSTANTIATE_TEST_SUITE_P(
           Values(ProgressMode::ThreadPolling, ProgressMode::ThreadBlocking),
           Values(ExtraParams{.genericCallbackType = GenericCallbackType::Pre},
                  ExtraParams{.genericCallbackType = GenericCallbackType::Post})));
-
-TEST(WorkerBuilderTest, BasicBuilderWithAuto)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker  = ucxx::experimental::createWorker(context).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-  ASSERT_FALSE(worker->isDelayedRequestSubmissionEnabled());
-  ASSERT_FALSE(worker->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, BuilderWithOptions)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker =
-    ucxx::experimental::createWorker(context).delayedSubmission(true).pythonFuture(true).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-  ASSERT_TRUE(worker->isDelayedRequestSubmissionEnabled());
-  ASSERT_TRUE(worker->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, BuilderMethodChainingOrder1)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker =
-    ucxx::experimental::createWorker(context).delayedSubmission(true).pythonFuture(false).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-  ASSERT_TRUE(worker->isDelayedRequestSubmissionEnabled());
-  ASSERT_FALSE(worker->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, BuilderMethodChainingOrder2)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker =
-    ucxx::experimental::createWorker(context).pythonFuture(true).delayedSubmission(false).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-  ASSERT_FALSE(worker->isDelayedRequestSubmissionEnabled());
-  ASSERT_TRUE(worker->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, BuilderExplicitTypeSpecification)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  std::shared_ptr<ucxx::Worker> worker = ucxx::experimental::createWorker(context);
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-  ASSERT_FALSE(worker->isDelayedRequestSubmissionEnabled());
-  ASSERT_FALSE(worker->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, BuilderAutoTypes)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-
-  auto builder1 = ucxx::experimental::createWorker(context);
-  static_assert(std::is_same<decltype(builder1), ucxx::experimental::WorkerBuilder>::value,
-                "auto without .build() is WorkerBuilder");
-
-  auto builder2 =
-    ucxx::experimental::createWorker(context).delayedSubmission(true).pythonFuture(true);
-  static_assert(std::is_same<decltype(builder2), ucxx::experimental::WorkerBuilder>::value,
-                "auto with config methods but without .build() is WorkerBuilder");
-
-  auto worker1 = builder1.build();
-  static_assert(std::is_same<decltype(worker1), std::shared_ptr<ucxx::Worker>>::value,
-                "Calling .build() on builder returns shared_ptr<Worker>");
-
-  std::shared_ptr<ucxx::Worker> worker2 = builder2;
-  static_assert(std::is_same<decltype(worker2), std::shared_ptr<ucxx::Worker>>::value,
-                "Implicit conversion with explicit type works");
-
-  auto worker3 = ucxx::experimental::createWorker(context).build();
-  static_assert(std::is_same<decltype(worker3), std::shared_ptr<ucxx::Worker>>::value,
-                "auto with .build() must be shared_ptr<Worker>");
-
-  auto worker4 =
-    ucxx::experimental::createWorker(context).delayedSubmission(true).pythonFuture(true).build();
-  static_assert(std::is_same<decltype(worker4), std::shared_ptr<ucxx::Worker>>::value,
-                "auto with config methods and .build() must be shared_ptr<Worker>");
-
-  ASSERT_TRUE(worker1 != nullptr);
-  ASSERT_TRUE(worker2 != nullptr);
-  ASSERT_TRUE(worker3 != nullptr);
-  ASSERT_TRUE(worker4 != nullptr);
-}
-
-TEST(WorkerBuilderTest, BuilderImplicitConversion)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  std::shared_ptr<ucxx::Worker> worker = ucxx::experimental::createWorker(context);
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-}
-
-TEST(WorkerBuilderTest, BuilderSingleConstructionPerSet)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto builder = ucxx::experimental::createWorker(context);
-  auto worker  = builder.build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->getHandle() != nullptr);
-
-  // Same builder can be used multiple times, but creates separate workers
-  auto worker2 = builder.build();
-  ASSERT_TRUE(worker2 != nullptr);
-  ASSERT_NE(worker->getHandle(), worker2->getHandle());
-}
-
-TEST(WorkerBuilderTest, BuilderDifferentInstances)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker1 = ucxx::experimental::createWorker(context).build();
-  auto worker2 = ucxx::experimental::createWorker(context).build();
-  ASSERT_TRUE(worker1 != nullptr);
-  ASSERT_TRUE(worker2 != nullptr);
-  ASSERT_NE(worker1->getHandle(), worker2->getHandle());
-}
-
-TEST(WorkerBuilderTest, BuilderBackwardCompatibility)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-
-  // Old API should still work
-  auto worker1 = context->createWorker(true, true);
-  ASSERT_TRUE(worker1 != nullptr);
-  ASSERT_TRUE(worker1->getHandle() != nullptr);
-  ASSERT_TRUE(worker1->isDelayedRequestSubmissionEnabled());
-  ASSERT_TRUE(worker1->isFutureEnabled());
-
-  // New API should produce equivalent result
-  auto worker2 =
-    ucxx::experimental::createWorker(context).delayedSubmission(true).pythonFuture(true).build();
-  ASSERT_TRUE(worker2 != nullptr);
-  ASSERT_TRUE(worker2->getHandle() != nullptr);
-  ASSERT_TRUE(worker2->isDelayedRequestSubmissionEnabled());
-  ASSERT_TRUE(worker2->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, RequestAttributesDefaultDisabled)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker  = ucxx::experimental::createWorker(context).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_FALSE(worker->isRequestAttributesEnabled());
-}
-
-TEST(WorkerBuilderTest, RequestAttributesEnabled)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker  = ucxx::experimental::createWorker(context).requestAttributes(true).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_TRUE(worker->isRequestAttributesEnabled());
-  ASSERT_FALSE(worker->isDelayedRequestSubmissionEnabled());
-  ASSERT_FALSE(worker->isFutureEnabled());
-}
-
-TEST(WorkerBuilderTest, RequestAttributesExplicitDisable)
-{
-  auto context = ucxx::experimental::createContext(ucxx::Context::defaultFeatureFlags).build();
-  auto worker  = ucxx::experimental::createWorker(context).requestAttributes(false).build();
-
-  ASSERT_TRUE(worker != nullptr);
-  ASSERT_FALSE(worker->isRequestAttributesEnabled());
-}
 
 TEST(AmReceiverCallbackOwnerTypeTest, DefaultConstructsEmpty)
 {

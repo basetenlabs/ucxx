@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -22,6 +23,9 @@
 #include <ucxx/constructors.h>
 #include <ucxx/context.h>
 #include <ucxx/delayed_submission.h>
+#include <ucxx/experimental/request_flush_builder.h>
+#include <ucxx/experimental/request_tag_builder.h>
+#include <ucxx/experimental/worker_builder.h>
 #include <ucxx/future.h>
 #include <ucxx/inflight_requests.h>
 #include <ucxx/notifier.h>
@@ -30,8 +34,15 @@
 
 namespace ucxx {
 
+class Component;
+class Request;
+
 namespace experimental {
 class WorkerBuilder;
+
+namespace detail {
+void registerInflightRequest(std::shared_ptr<Component> component, std::shared_ptr<Request> req);
+}  // namespace detail
 }  // namespace experimental
 
 class Address;
@@ -67,7 +78,9 @@ class Worker : public Component {
                                             ///< remain in progress; pruned as they complete,
                                             ///< never re-canceled
   WorkerProgressThread _progressThread{};   ///< The progress thread object
-  std::thread::id _progressThreadId{};      ///< The progress thread ID
+  std::atomic<bool> _progressThreadRunning{false};      ///< Whether the progress thread is running
+  std::atomic<bool> _progressThreadPollingMode{false};  ///< Whether the progress thread polls
+  std::atomic<std::thread::id> _progressThreadId{std::thread::id()};  ///< The progress thread ID
   std::function<void(void*)> _progressThreadStartCallback{
     nullptr};  ///< The callback function to execute at progress thread start
   void* _progressThreadStartCallbackArg{
@@ -156,10 +169,10 @@ class Worker : public Component {
    * Configure which buffer type to use when allocating CUDA buffers for incoming
    * multi-buffer tag receives.
    *
-   * @param[in] bufferType  the preferred buffer type (must be `BufferType::RMM` or
-   *                        `BufferType::CCCL`).
+   * @param[in] bufferType  the preferred buffer type (currently only `BufferType::CCCL`
+   *                        is supported).
    *
-   * @throws std::invalid_argument if bufferType is not RMM or CCCL.
+   * @throws std::invalid_argument if bufferType is not CCCL.
    */
   void setCudaBufferType(BufferType bufferType);
 
@@ -206,6 +219,12 @@ class Worker : public Component {
    * @brief Allow experimental::WorkerBuilder to access protected/private constructor.
    */
   friend class experimental::WorkerBuilder;
+
+  /**
+   * @brief Allow request builders to register newly-created requests.
+   */
+  friend void experimental::detail::registerInflightRequest(std::shared_ptr<Component> component,
+                                                            std::shared_ptr<Request> req);
 
   /**
    * @brief `ucxx::Worker` destructor.
@@ -533,7 +552,7 @@ class Worker : public Component {
    *
    * Returns the buffer type used when allocating CUDA buffers for incoming
    * multi-buffer tag receives. Defaults to CCCL if compiled with CCCL support,
-   * otherwise RMM if compiled with RMM support, otherwise Invalid.
+   * otherwise Invalid.
    *
    * @returns The preferred `BufferType` for CUDA allocations.
    */
@@ -814,6 +833,25 @@ class Worker : public Component {
     RequestCallbackUserData callbackData         = nullptr);
 
   /**
+   * @brief Create a builder for a tag receive operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `tagRecv()`.
+   *
+   * @param[in] buffer            a raw pointer to pre-allocated memory where resulting
+   *                              data will be stored.
+   * @param[in] length            the size in bytes of the message to be received.
+   * @param[in] tag               the tag to match.
+   * @param[in] tagMask           the tag mask to use.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestTagBuilder tagRecvBuilder(void* buffer,
+                                                               size_t length,
+                                                               Tag tag,
+                                                               TagMask tagMask);
+
+  /**
    * @brief Enqueue a tag receive operation using a message handle.
    *
    * Enqueue a tag receive operation using a message handle obtained from `tagProbe` with
@@ -842,6 +880,21 @@ class Worker : public Component {
     const bool enableFuture                      = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for a tag receive operation using a message handle.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `tagRecvWithHandle()`.
+   *
+   * @param[in] buffer            a raw pointer to pre-allocated memory where resulting
+   *                              data will be stored.
+   * @param[in] probeInfo         the TagProbeInfo object containing message length and handle.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestTagBuilder tagRecvWithHandleBuilder(
+    void* buffer, std::shared_ptr<TagProbeInfo> probeInfo);
 
   /**
    * @brief Get the address of the UCX worker object.
@@ -1094,7 +1147,9 @@ class Worker : public Component {
    * // context is `std::shared_ptr<ucxx::Context>`
    * auto worker = context->createWorker(false);
    *
-   * worker->registerAmAllocator(`UCS_MEMORY_TYPE_CUDA`, ucxx::RMMBuffer);
+   * worker->registerAmAllocator(UCS_MEMORY_TYPE_CUDA, [](size_t length) {
+   *   return std::make_shared<ucxx::CCCLBuffer>(length);
+   * });
    * @endcode
    *
    * @param[in] memoryType  the memory type the allocator will be used for.
@@ -1193,6 +1248,16 @@ class Worker : public Component {
     RequestCallbackUserData callbackData         = nullptr);
 
   /**
+   * @brief Create a builder for a flush operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `flush()`.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestFlushBuilder flushBuilder();
+
+  /**
    * @brief Worker attributes reported by `ucp_worker_query`.
    */
   struct Attributes {
@@ -1240,11 +1305,8 @@ class Worker : public Component {
  *                         `ucxx::Request`, currently used only by `ucxx::python::Worker`.
  * @returns The `shared_ptr<ucxx::Worker>` object
  */
-std::shared_ptr<Worker> createWorker(std::shared_ptr<Context> context,
-                                     const bool enableDelayedSubmission,
-                                     const bool enableFuture);
+[[nodiscard]] std::shared_ptr<Worker> createWorker(std::shared_ptr<Context> context,
+                                                   const bool enableDelayedSubmission,
+                                                   const bool enableFuture);
 
 }  // namespace ucxx
-
-// Include experimental features
-#include <ucxx/experimental/worker_builder.h>

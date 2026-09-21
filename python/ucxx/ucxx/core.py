@@ -352,7 +352,7 @@ register_am_host_allocator.__doc__ = (
 create_listener.__doc__ = ApplicationContext.create_listener.__doc__
 create_endpoint.__doc__ = ApplicationContext.create_endpoint.__doc__
 continuous_ucx_progress.__doc__ = ApplicationContext.continuous_ucx_progress.__doc__
-get_ucp_worker.__doc__ = ApplicationContext.get_ucp_worker.__doc__
+get_ucp_worker.__doc__ = ApplicationContext.ucp_worker.__doc__
 stop_notifier_thread.__doc__ = ApplicationContext.stop_notifier_thread.__doc__
 
 __all__ = [

@@ -16,6 +16,13 @@
 #include <ucxx/address.h>
 #include <ucxx/component.h>
 #include <ucxx/exception.h>
+#include <ucxx/experimental/endpoint_builder.h>
+#include <ucxx/experimental/request_am_builder.h>
+#include <ucxx/experimental/request_flush_builder.h>
+#include <ucxx/experimental/request_mem_builder.h>
+#include <ucxx/experimental/request_stream_builder.h>
+#include <ucxx/experimental/request_tag_builder.h>
+#include <ucxx/experimental/request_tag_multi_builder.h>
 #include <ucxx/inflight_requests.h>
 #include <ucxx/listener.h>
 #include <ucxx/request.h>
@@ -24,6 +31,18 @@
 #include <ucxx/worker.h>
 
 namespace ucxx {
+
+class Component;
+class Request;
+class RequestEndpointClose;
+
+namespace experimental {
+class RequestEndpointCloseBuilder;
+
+namespace detail {
+void registerInflightRequest(std::shared_ptr<Component> component, std::shared_ptr<Request> req);
+}  // namespace detail
+}  // namespace experimental
 
 /**
  * @brief Deleter for a endpoint parameters object.
@@ -106,7 +125,7 @@ class Endpoint : public Component {
    * @brief Register an inflight request.
    *
    * Called each time a new transfer request is made by the `Endpoint`, such that it may
-   * be canceled when necessary. Also schedule requests to be canceled immediately after
+   * be canceled when necessary. Also schedules requests to be canceled immediately after
    * registration if the endpoint error handler has been called with an error.
    *
    * @param[in] request the request to register.
@@ -114,6 +133,27 @@ class Endpoint : public Component {
    * @return the request that was registered (i.e., the `request` argument itself).
    */
   [[nodiscard]] std::shared_ptr<Request> registerInflightRequest(std::shared_ptr<Request> request);
+
+  /**
+   * @brief Create an endpoint close request while preserving endpoint close state.
+   *
+   * Marks the endpoint as closing before creating the close request, combines the per-request
+   * callback with the endpoint close callback, and registers the request as inflight.
+   *
+   * @param[in] force               force endpoint close if `true`, flush otherwise.
+   * @param[in] enablePythonFuture  whether a python future should be created and subsequently
+   *                                notified.
+   * @param[in] callbackFunction    user-defined callback function to call upon completion.
+   * @param[in] callbackData        user-defined data to pass to the `callbackFunction`.
+   *
+   * @return Request to be subsequently checked for the completion and its state, or `nullptr`
+   *         if the endpoint has already closed or is already in process of closing.
+   */
+  [[nodiscard]] std::shared_ptr<RequestEndpointClose> closeRequest(
+    const bool force,
+    const bool enablePythonFuture,
+    EndpointCloseCallbackUserFunction callbackFunction,
+    EndpointCloseCallbackUserData callbackData);
 
   /**
    * @brief The error callback registered at endpoint creation time.
@@ -128,6 +168,17 @@ class Endpoint : public Component {
   friend void endpointErrorCallback(void* arg, ucp_ep_h ep, ucs_status_t status);
 
   friend class RequestAm;
+
+  /**
+   * @brief Allow the endpoint close builder to preserve endpoint close state.
+   */
+  friend class experimental::RequestEndpointCloseBuilder;
+
+  /**
+   * @brief Allow request builders to register newly-created requests.
+   */
+  friend void experimental::detail::registerInflightRequest(std::shared_ptr<Component> component,
+                                                            std::shared_ptr<Request> req);
 
  public:
   Endpoint()                           = delete;
@@ -423,6 +474,22 @@ class Endpoint : public Component {
     RequestCallbackUserData callbackData                             = nullptr);
 
   /**
+   * @brief Create a builder for an active message send operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `amSend()`.
+   *
+   * @param[in] buffer                  a raw pointer to the data to be sent.
+   * @param[in] length                  the size in bytes of the message to be sent.
+   * @param[in] memoryType              the memory type of the buffer.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestAmBuilder amSendBuilder(const void* const buffer,
+                                                             const size_t length,
+                                                             const ucs_memory_type_t memoryType);
+
+  /**
    * @brief Enqueue an active message send operation with explicit policy parameters.
    *
    * This overload extends `amSend()` with explicit UCX datatype/flags controls and receive
@@ -447,6 +514,22 @@ class Endpoint : public Component {
     RequestCallbackUserData callbackData         = nullptr);
 
   /**
+   * @brief Create a builder for an active message send operation with explicit policy parameters.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `amSend()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be sent.
+   * @param[in] length              the size in bytes of the message to be sent.
+   * @param[in] params              active message send parameters.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestAmBuilder amSendBuilder(const void* const buffer,
+                                                             const size_t length,
+                                                             const AmSendParams& params);
+
+  /**
    * @brief Enqueue an active message send operation with IOV datatype.
    *
    * This overload submits `UCP_DATATYPE_IOV` active message sends.
@@ -467,6 +550,21 @@ class Endpoint : public Component {
     const bool enablePythonFuture                = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for an active message send operation with IOV datatype.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `amSend()`.
+   *
+   * @param[in] iov                 vector of IOV segments to be sent.
+   * @param[in] params              active message send parameters. Datatype must be
+   *                                `UCP_DATATYPE_IOV`.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestAmBuilder amSendBuilder(std::vector<ucp_dt_iov_t> iov,
+                                                             const AmSendParams& params);
 
   /**
    * @brief Enqueue an active message receive operation.
@@ -494,12 +592,22 @@ class Endpoint : public Component {
    * @param[in] callbackFunction    user-defined callback function to call upon completion.
    * @param[in] callbackData        user-defined data to pass to the `callbackFunction`.
    *
-   * @returns Request to be subsequently checked for the completion state and data.
+   * @returns Request to be subsequently checked for the completion and its state.
    */
   [[nodiscard]] std::shared_ptr<Request> amRecv(
     const bool enablePythonFuture                = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for an active message receive operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `amRecv()`.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestAmBuilder amRecvBuilder();
 
   /**
    * @brief Enqueue a memory put operation.
@@ -540,6 +648,25 @@ class Endpoint : public Component {
     const bool enablePythonFuture                = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for a memory put operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `memPut()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be sent.
+   * @param[in] length              the size in bytes of the message to be sent.
+   * @param[in] remoteAddr          the destination remote memory address to write to.
+   * @param[in] rkey                the remote memory key associated with the remote memory
+   *                                address.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestMemBuilder memPutBuilder(const void* const buffer,
+                                                              size_t length,
+                                                              uint64_t remoteAddr,
+                                                              ucp_rkey_h rkey);
 
   /**
    * @brief Enqueue a memory put operation.
@@ -584,6 +711,22 @@ class Endpoint : public Component {
     RequestCallbackUserData callbackData         = nullptr);
 
   /**
+   * @brief Create a builder for a memory put operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `memPut()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be sent.
+   * @param[in] length              the size in bytes of the message to be sent.
+   * @param[in] remoteKey           the remote memory key associated with the remote memory
+   *                                address.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestMemBuilder memPutBuilder(
+    const void* const buffer, size_t length, std::shared_ptr<ucxx::RemoteKey> remoteKey);
+
+  /**
    * @brief Enqueue a memory get operation.
    *
    * Enqueue a memory operation, returning a `std::shared<ucxx::Request>` that can be later
@@ -622,6 +765,25 @@ class Endpoint : public Component {
     const bool enablePythonFuture                = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for a memory get operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `memGet()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be received.
+   * @param[in] length              the size in bytes of the message to be received.
+   * @param[in] remoteAddr          the source remote memory address to read from.
+   * @param[in] rkey                the remote memory key associated with the remote memory
+   *                                address.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestMemBuilder memGetBuilder(void* buffer,
+                                                              size_t length,
+                                                              uint64_t remoteAddr,
+                                                              ucp_rkey_h rkey);
 
   /**
    * @brief Enqueue a memory get operation.
@@ -666,6 +828,22 @@ class Endpoint : public Component {
     RequestCallbackUserData callbackData         = nullptr);
 
   /**
+   * @brief Create a builder for a memory get operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `memGet()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be received.
+   * @param[in] length              the size in bytes of the message to be received.
+   * @param[in] remoteKey           the remote memory key associated with the remote memory
+   *                                address.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestMemBuilder memGetBuilder(
+    void* buffer, size_t length, std::shared_ptr<ucxx::RemoteKey> remoteKey);
+
+  /**
    * @brief Enqueue a stream send operation.
    *
    * Enqueue a stream send operation, returning a `std::shared<ucxx::Request>` that can
@@ -687,6 +865,20 @@ class Endpoint : public Component {
   [[nodiscard]] std::shared_ptr<Request> streamSend(const void* const buffer,
                                                     size_t length,
                                                     const bool enablePythonFuture);
+
+  /**
+   * @brief Create a builder for a stream send operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `streamSend()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be sent.
+   * @param[in] length              the size in bytes of the message to be sent.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestStreamBuilder streamSendBuilder(const void* const buffer,
+                                                                     size_t length);
 
   /**
    * @brief Enqueue a stream receive operation.
@@ -711,6 +903,20 @@ class Endpoint : public Component {
   [[nodiscard]] std::shared_ptr<Request> streamRecv(void* buffer,
                                                     size_t length,
                                                     const bool enablePythonFuture);
+
+  /**
+   * @brief Create a builder for a stream receive operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `streamRecv()`.
+   *
+   * @param[in] buffer              a raw pointer to pre-allocated memory where resulting
+   *                                data will be stored.
+   * @param[in] length              the size in bytes of the message to be received.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestStreamBuilder streamRecvBuilder(void* buffer, size_t length);
 
   /**
    * @brief Enqueue a tag send operation.
@@ -748,6 +954,22 @@ class Endpoint : public Component {
     const bool enablePythonFuture                = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for a tag send operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `tagSend()`.
+   *
+   * @param[in] buffer              a raw pointer to the data to be sent.
+   * @param[in] length              the size in bytes of the message to be sent.
+   * @param[in] tag                 the tag to match.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestTagBuilder tagSendBuilder(const void* const buffer,
+                                                               size_t length,
+                                                               Tag tag);
 
   /**
    * @brief Enqueue a tag receive operation.
@@ -790,6 +1012,25 @@ class Endpoint : public Component {
     RequestCallbackUserData callbackData         = nullptr);
 
   /**
+   * @brief Create a builder for a tag receive operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `tagRecv()`.
+   *
+   * @param[in] buffer              a raw pointer to pre-allocated memory where resulting
+   *                                data will be stored.
+   * @param[in] length              the size in bytes of the message to be received.
+   * @param[in] tag                 the tag to match.
+   * @param[in] tagMask             the tag mask to use.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestTagBuilder tagRecvBuilder(void* buffer,
+                                                               size_t length,
+                                                               Tag tag,
+                                                               TagMask tagMask);
+
+  /**
    * @brief Enqueue a multi-buffer tag send operation.
    *
    * Enqueue a multi-buffer tag send operation, returning a
@@ -829,15 +1070,33 @@ class Endpoint : public Component {
                                                       const bool enablePythonFuture);
 
   /**
+   * @brief Create a builder for a multi-buffer tag send operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `tagMultiSend()`.
+   *
+   * @param[in] buffer              a vector of raw pointers to the data frames to be sent.
+   * @param[in] size                a vector of size in bytes of each frame to be sent.
+   * @param[in] isCUDA              a vector indicating whether each frame is CUDA memory.
+   * @param[in] tag                 the tag to match.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestTagMultiBuilder tagMultiSendBuilder(
+    const std::vector<const void*>& buffer,
+    const std::vector<size_t>& size,
+    const std::vector<int>& isCUDA,
+    const Tag tag);
+
+  /**
    * @brief Enqueue a multi-buffer tag receive operation.
    *
    * Enqueue a multi-buffer tag receive operation, returning a
    * `std::shared<ucxx::RequestTagMulti>` that can be later awaited and checked for errors.
    * This is a non-blocking operation, and because the receiver has no a priori knowledge
    * of the data being received, memory allocations are automatically handled internally.
-   * The receiver must have the same capabilities of the sender, so that if the sender is
-   * compiled with RMM support to allow for CUDA transfers, the receiver must have the
-   * ability to understand and allocate CUDA memory.
+   * Receiving CUDA frames requires UCXX to be compiled with CCCL support (`UCXX_ENABLE_CCCL`)
+   * and the receiving worker to be configured to allocate CCCL buffers for CUDA frames.
    *
    * Using a Python future may be requested by specifying `enablePythonFuture`. If a
    * Python future is requested, the Python application must then await on this future to
@@ -853,6 +1112,20 @@ class Endpoint : public Component {
   [[nodiscard]] std::shared_ptr<Request> tagMultiRecv(const Tag tag,
                                                       const TagMask tagMask,
                                                       const bool enablePythonFuture);
+
+  /**
+   * @brief Create a builder for a multi-buffer tag receive operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `tagMultiRecv()`.
+   *
+   * @param[in] tag                 the tag to match.
+   * @param[in] tagMask             the tag mask to use.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestTagMultiBuilder tagMultiRecvBuilder(const Tag tag,
+                                                                         const TagMask tagMask);
 
   /**
    * @brief Enqueue a flush operation.
@@ -885,6 +1158,16 @@ class Endpoint : public Component {
     const bool enablePythonFuture                = false,
     RequestCallbackUserFunction callbackFunction = nullptr,
     RequestCallbackUserData callbackData         = nullptr);
+
+  /**
+   * @brief Create a builder for a flush operation.
+   *
+   * Calling this method only creates the builder. Finalizing it with `.build()` or
+   * implicit conversion invokes the same request-creation path as `flush()`.
+   *
+   * @returns Builder to configure optional parameters and submit the request.
+   */
+  [[nodiscard]] experimental::RequestFlushBuilder flushBuilder();
 
   /**
    * @brief Get `ucxx::Worker` component from a worker or listener object.
@@ -953,20 +1236,19 @@ class Endpoint : public Component {
   /**
    * @brief Close the endpoint while keeping the object alive.
    *
-   * Close the endpoint without requiring to destroy the object, blocking until the
-   * operation completes. This may be useful when `std::shared_ptr<ucxx::Request>` objects
-   * are still alive.
+   * Close the endpoint without requiring to destroy the object, first canceling inflight
+   * requests and then waiting for the close operation to complete when possible. This may
+   * be useful when `std::shared_ptr<ucxx::Request>` objects are still alive.
    *
    * If the endpoint was created with error handling support, the error callback will be
    * executed, implying the user-defined callback will also be executed if one was
    * registered with `setCloseCallback()`.
    *
-   * If the parent worker is running a progress thread, a maximum timeout may be specified
-   * for which the close operation will wait. This can be particularly important for cases
-   * where the progress thread might be attempting to acquire a resource (e.g., the Python
-   * GIL) while the current thread owns that resource. In particular for Python, the
-   * `~Endpoint()` will call this method for which we can't release the GIL when the garbage
-   * collector runs and destroys the object.
+   * If the parent worker is running a progress thread, `period` and `maxAttempts` bound how
+   * long this method waits for progress-thread submission and completion checks. If close
+   * completion cannot be observed before all attempts expire, the endpoint status is set to
+   * `UCS_ERR_ENDPOINT_TIMEOUT` before returning. Any UCP endpoint close request handle
+   * returned by `ucp_ep_close_nbx()` is released before this method returns.
    *
    * @param[in] period      maximum period to wait for a generic pre/post progress thread
    *                        operation will wait for.

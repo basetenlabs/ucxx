@@ -43,7 +43,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/conda-cpp-build.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/conda-cpp-build.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -60,7 +60,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/conda-python-build.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/conda-python-build.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -79,12 +79,12 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/custom-job.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/custom-job.yaml@main
     with:
       arch: "amd64"
       branch: ${{ inputs.branch }}
       build_type: ${{ inputs.build_type || 'branch' }}
-      container_image: "rapidsai/ci-conda:26.06-latest"
+      container_image: "rapidsai/ci-conda:26.08-latest"
       date: ${{ inputs.date }}
       node_type: "gpu-l4-latest-1"
       script: "ci/build_docs.sh"
@@ -98,7 +98,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/conda-upload-packages.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/conda-upload-packages.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -112,7 +112,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-build.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-build.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -133,7 +133,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-publish.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-publish.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -141,6 +141,7 @@ jobs:
       date: ${{ inputs.date }}
       package-name: libucxx
       package-type: cpp
+      publish-wheel-search-key: ucxx_wheel_cpp_libucxx
   wheel-build-ucxx:
     needs: wheel-build-libucxx
     permissions:
@@ -150,7 +151,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-build.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-build.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -171,7 +172,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-publish.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-publish.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -179,7 +180,7 @@ jobs:
       date: ${{ inputs.date }}
       package-name: ucxx
       package-type: python
-      publish-wheel-search-key: ucxx_wheel_python_abi3
+      publish-wheel-search-key: ucxx_wheel_python_ucxx
   wheel-build-distributed-ucxx:
     permissions:
       actions: read
@@ -188,7 +189,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-build.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-build.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -208,7 +209,7 @@ jobs:
       packages: read
       pull-requests: read
     secrets: inherit # zizmor: ignore[secrets-inherit]
-    uses: rapidsai/shared-workflows/.github/workflows/wheels-publish.yaml@release/26.06
+    uses: rapidsai/shared-workflows/.github/workflows/wheels-publish.yaml@main
     with:
       build_type: ${{ inputs.build_type || 'branch' }}
       branch: ${{ inputs.branch }}
@@ -216,4 +217,13 @@ jobs:
       date: ${{ inputs.date }}
       package-name: distributed_ucxx
       package-type: python
-      publish-wheel-search-key: "distributed-ucxx_wheel"
+      publish-wheel-search-key: "ucxx_wheel_python_distributed-ucxx"
+  devcontainers:
+    name: Build devcontainers
+    secrets: inherit  # zizmor: ignore[secrets-inherit]
+    uses: rapidsai/shared-workflows/.github/workflows/build-devcontainers.yaml@main
+    permissions:
+      packages: write
+    with:
+      push: true
+      cuda: '["12.9", "13.3"]'
