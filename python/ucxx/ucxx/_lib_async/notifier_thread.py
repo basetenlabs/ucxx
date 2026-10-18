@@ -4,7 +4,7 @@
 
 import asyncio
 import logging
-from concurrent.futures import TimeoutError
+import threading
 
 import ucxx._lib.libucxx as ucx_api
 
@@ -31,6 +31,15 @@ def _notifierThread(event_loop, worker, q):
     logger.debug("Starting Notifier Thread")
     asyncio.set_event_loop(event_loop)
     shutdown = False
+    # Set once the loop has run a notification; bounds how long this thread waits
+    # before looking for the next, as the 10 ms result wait did.
+    notified = threading.Event()
+
+    def notify():
+        try:
+            worker.run_request_notifier()
+        finally:
+            notified.set()
 
     while True:
         worker.populate_python_futures_pool()
@@ -51,19 +60,18 @@ def _notifierThread(event_loop, worker, q):
         elif state == ucx_api.PythonRequestNotifierWaitState.Timeout:
             continue
 
-        # Notify all enqueued waiting futures
-        task = asyncio.run_coroutine_threadsafe(
-            _run_request_notifier(worker), event_loop
-        )
+        # Notify all enqueued waiting futures, as one plain callback on the loop:
+        # a coroutine would cost the loop a Task and a chained future per wakeup.
+        notified.clear()
         try:
-            task.result(0.01)
-        except TimeoutError:
-            # Do NOT cancel the task here. run_request_notifier() sets asyncio
-            # Futures for completed UCX requests; cancelling leaves them unset and
-            # causes send/recv to hang.
-            logger.debug("Notifier Thread Result Timeout (task left scheduled)")
-        except Exception as e:
-            logger.debug(f"Notifier Thread Result Exception: {e}")
+            event_loop.call_soon_threadsafe(notify)
+        except RuntimeError as e:
+            logger.debug(f"Notifier Thread could not reach the event loop: {e}")
+            break
+        if not notified.wait(0.01):
+            # The callback stays scheduled: run_request_notifier() sets the asyncio
+            # Futures of completed UCX requests, and dropping it would hang them.
+            logger.debug("Notifier Thread notification still pending")
 
     # Clear all Python futures to ensure no references are held to the
     # `ucxx::Worker` that will prevent destructors from running.
