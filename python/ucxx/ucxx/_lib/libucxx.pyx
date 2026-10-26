@@ -736,6 +736,26 @@ cdef void _generic_callback(void *args) with gil:
         pass
 
 
+cdef extern from *:
+    """
+    #include <ucxx/api.h>
+    static bool ucxx_run_on_progress_thread(ucxx::Worker* worker, void (*trampoline)(void*), void* arg)
+    {
+      return worker->registerGenericPre([trampoline, arg]() { trampoline(arg); });
+    }
+    """
+    bint ucxx_run_on_progress_thread(Worker* worker, void (*trampoline)(void*) noexcept, void* arg) nogil
+
+
+cdef void _run_callable(void *arg) noexcept with gil:
+    """Run the callable a `run_on_progress_thread` call boxed, keeping what it raised."""
+    cdef list box = <list> arg
+    try:
+        box[0]()
+    except BaseException as e:
+        box[1] = e
+
+
 cdef class UCXWorker():
     """Python representation of `ucp_worker_h`"""
     def __init__(
@@ -1191,6 +1211,18 @@ cdef class UCXWorker():
             self._worker.get().registerAmAllocator(
                 UCS_MEMORY_TYPE_HOST, wrapped_allocator
             )
+
+    def run_on_progress_thread(self, fn) -> None:
+        """Run `fn` on the progress thread before its next worker progress and return once it ran.
+
+        Called from the progress thread itself, `fn` runs at once. The GIL is
+        released while waiting. An exception `fn` raises is re-raised here.
+        """
+        cdef list box = [fn, None]
+        with nogil:
+            ucxx_run_on_progress_thread(self._worker.get(), _run_callable, <void*>box)
+        if box[1] is not None:
+            raise box[1]
 
     def stop_request_notifier_thread(self) -> None:
         with nogil:
