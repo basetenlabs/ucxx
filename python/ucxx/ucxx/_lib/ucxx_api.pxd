@@ -42,6 +42,11 @@ cdef extern from "ucp/api/ucp.h" nogil:
 
     ctypedef ucp_ep* ucp_ep_h
 
+    ctypedef struct ucp_mem:
+        pass
+
+    ctypedef ucp_mem* ucp_mem_h
+
     ctypedef ucp_conn_request* ucp_conn_request_h
 
     ctypedef struct ucp_conn_request:
@@ -443,6 +448,46 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         void* getFuture() except +raise_py_error
         shared_ptr[Buffer] getRecvBuffer() except +raise_py_error
         void cancel()
+
+
+cdef extern from "<ucxx/memory_handle.h>" namespace "ucxx" nogil:
+    cdef cppclass MemoryHandle(Component):
+        ucp_mem_h getHandle()
+        size_t getSize() const
+        uint64_t getBaseAddress()
+
+
+cdef extern from "<ucxx/remote_key.h>" namespace "ucxx" nogil:
+    cdef cppclass RemoteKey(Component):
+        string serialize() except +raise_py_error
+
+
+cdef extern from "<ucxx/request_mem_putv.h>" namespace "ucxx" nogil:
+    cdef cppclass RequestMemPutv(Request):
+        pass
+
+    shared_ptr[RequestMemPutv] createRequestMemPutv(
+        shared_ptr[Endpoint] endpoint,
+        vector[const void*] buffers,
+        vector[size_t] lengths,
+        vector[uint64_t] remote_addrs,
+        shared_ptr[RemoteKey] remote_key,
+        ucs_memory_type_t memory_type,
+        vector[ucp_mem_h] memory_handles,
+        bint enable_python_future,
+    ) except +raise_py_error
+
+
+cdef extern from "<ucxx/constructors.h>" namespace "ucxx" nogil:
+    shared_ptr[MemoryHandle] createMemoryHandle(
+        shared_ptr[Context] context, size_t size, void* buffer, ucs_memory_type_t memory_type
+    ) except +raise_py_error
+    shared_ptr[RemoteKey] createRemoteKeyFromMemoryHandle(
+        shared_ptr[MemoryHandle] memory_handle
+    ) except +raise_py_error
+    shared_ptr[RemoteKey] createRemoteKeyFromSerialized(
+        shared_ptr[Endpoint] endpoint, string serialized_remote_key
+    ) except +raise_py_error
 
 
 cdef extern from "<ucxx/request_tag_multi.h>" namespace "ucxx" nogil:
