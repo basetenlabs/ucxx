@@ -30,13 +30,13 @@ def loopback():
     src_handle = ucx_api.UCXMemoryHandle.create(ctx, _address(src), len(src), host)
     dst_handle = ucx_api.UCXMemoryHandle.create(ctx, _address(dst), len(dst), host)
     remote_key = ucx_api.UCXRemoteKey.from_serialized(ep, dst_handle.remote_key().serialize())
-    yield worker, ep, src, dst, src_handle, remote_key
+    yield worker, ep, src, dst, src_handle, remote_key, ctx
     del remote_key, src_handle, dst_handle
     ep.close_blocking(period=10**10, max_attempts=1)
 
 
 def test_every_span_lands_at_its_own_remote_address(loopback):
-    worker, ep, src, dst, src_handle, remote_key = loopback
+    worker, ep, src, dst, src_handle, remote_key, ctx = loopback
     # Spans land out of order, so a put that ignored its remote address would show.
     order = [2, 0, 1]
 
@@ -54,8 +54,31 @@ def test_every_span_lands_at_its_own_remote_address(loopback):
         assert dst[order[i] * SPAN : (order[i] + 1) * SPAN] == src[i * SPAN : (i + 1) * SPAN]
 
 
+def test_spans_under_different_remote_keys_land_in_their_own_regions(loopback):
+    """Each region has its own key, as each layer of a KV pool does; one request reaches both."""
+    worker, ep, src, dst, src_handle, remote_key, ctx = loopback
+    other = bytearray(SPAN)
+    other_handle = ucx_api.UCXMemoryHandle.create(
+        ctx, _address(other), len(other), ucx_api.MemoryType.HOST
+    )
+    other_key = ucx_api.UCXRemoteKey.from_serialized(ep, other_handle.remote_key().serialize())
+
+    request = ep.mem_putv(
+        [_address(src), _address(src) + SPAN],
+        [SPAN, SPAN],
+        [_address(dst), _address(other)],
+        [remote_key, other_key],
+        ucx_api.MemoryType.HOST,
+        [src_handle.handle] * 2,
+    )
+    wait_requests(worker, "blocking", request)
+
+    assert dst[:SPAN] == src[:SPAN] and other == src[SPAN : 2 * SPAN]
+    del other_key, other_handle
+
+
 def test_a_span_without_its_memory_handle_is_refused(loopback):
-    worker, ep, src, dst, src_handle, remote_key = loopback
+    worker, ep, src, dst, src_handle, remote_key, ctx = loopback
 
     with pytest.raises(ValueError, match="memory handle"):
         ep.mem_putv(

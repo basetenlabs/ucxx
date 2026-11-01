@@ -471,7 +471,7 @@ cdef extern from "<ucxx/request_mem_putv.h>" namespace "ucxx" nogil:
         vector[const void*] buffers,
         vector[size_t] lengths,
         vector[uint64_t] remote_addrs,
-        shared_ptr[RemoteKey] remote_key,
+        vector[shared_ptr[RemoteKey]] remote_keys,
         ucs_memory_type_t memory_type,
         vector[ucp_mem_h] memory_handles,
         bint enable_python_future,

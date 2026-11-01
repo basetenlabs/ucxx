@@ -1958,12 +1958,13 @@ cdef class UCXEndpoint():
         buffers,
         lengths,
         remote_addrs,
-        UCXRemoteKey remote_key,
+        remote_keys,
         memory_type,
         memory_handles,
     ) -> UCXRequest:
         """Put span `i` from `buffers[i]` to `remote_addrs[i]` on the peer; one request for all.
 
+        `remote_keys` is one `UCXRemoteKey` for every span, or a sequence with one per span.
         The request completes once every put and the endpoint flush after them have
         completed, so its future is set once. Every span needs its memory handle
         (`UCXMemoryHandle.handle`): UCX is never asked to detect the memory type.
@@ -1971,6 +1972,8 @@ cdef class UCXEndpoint():
         cdef vector[const void*] c_buffers
         cdef vector[size_t] c_lengths
         cdef vector[uint64_t] c_remote_addrs
+        cdef vector[shared_ptr[RemoteKey]] c_remote_keys
+        cdef UCXRemoteKey remote_key
         cdef vector[ucp_mem_h] c_memory_handles
         cdef shared_ptr[Request] req
         cdef int memory_type_value = MemoryType(memory_type).value
@@ -1985,6 +1988,10 @@ cdef class UCXEndpoint():
             c_lengths.push_back(length)
         for remote_addr in remote_addrs:
             c_remote_addrs.push_back(remote_addr)
+        if isinstance(remote_keys, UCXRemoteKey):
+            remote_keys = [remote_keys] * c_remote_addrs.size()
+        for remote_key in remote_keys:
+            c_remote_keys.push_back(remote_key._remote_key)
         for memory_handle in memory_handles:
             c_memory_handles.push_back(<ucp_mem_h><uintptr_t>memory_handle)
 
@@ -1995,7 +2002,7 @@ cdef class UCXEndpoint():
                     move(c_buffers),
                     move(c_lengths),
                     move(c_remote_addrs),
-                    remote_key._remote_key,
+                    move(c_remote_keys),
                     c_memory_type,
                     move(c_memory_handles),
                     self._enable_python_future,

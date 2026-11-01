@@ -21,7 +21,7 @@ std::shared_ptr<RequestMemPutv> createRequestMemPutv(std::shared_ptr<Endpoint> e
                                                      std::vector<const void*> buffers,
                                                      std::vector<size_t> lengths,
                                                      std::vector<uint64_t> remoteAddrs,
-                                                     std::shared_ptr<RemoteKey> remoteKey,
+                                                     std::vector<std::shared_ptr<RemoteKey>> remoteKeys,
                                                      ucs_memory_type_t memoryType,
                                                      std::vector<ucp_mem_h> memoryHandles,
                                                      const bool enablePythonFuture,
@@ -32,7 +32,7 @@ std::shared_ptr<RequestMemPutv> createRequestMemPutv(std::shared_ptr<Endpoint> e
                                                                 std::move(buffers),
                                                                 std::move(lengths),
                                                                 std::move(remoteAddrs),
-                                                                std::move(remoteKey),
+                                                                std::move(remoteKeys),
                                                                 memoryType,
                                                                 std::move(memoryHandles),
                                                                 enablePythonFuture,
@@ -51,7 +51,7 @@ RequestMemPutv::RequestMemPutv(std::shared_ptr<Endpoint> endpoint,
                                std::vector<const void*> buffers,
                                std::vector<size_t> lengths,
                                std::vector<uint64_t> remoteAddrs,
-                               std::shared_ptr<RemoteKey> remoteKey,
+                               std::vector<std::shared_ptr<RemoteKey>> remoteKeys,
                                ucs_memory_type_t memoryType,
                                std::vector<ucp_mem_h> memoryHandles,
                                const bool enablePythonFuture,
@@ -66,22 +66,23 @@ RequestMemPutv::RequestMemPutv(std::shared_ptr<Endpoint> endpoint,
     _buffers(std::move(buffers)),
     _lengths(std::move(lengths)),
     _remoteAddrs(std::move(remoteAddrs)),
-    _remoteKey(std::move(remoteKey)),
+    _remoteKeys(std::move(remoteKeys)),
     _memoryType(memoryType),
     _memoryHandles(std::move(memoryHandles))
 {
   if (_endpoint == nullptr)
     throw std::invalid_argument("A valid endpoint is required to put memory.");
-  if (_remoteKey == nullptr) throw std::invalid_argument("memPutv needs a remote key.");
   const size_t spans = _buffers.size();
   if (spans == 0 || _lengths.size() != spans || _remoteAddrs.size() != spans ||
-      _memoryHandles.size() != spans)
+      _remoteKeys.size() != spans || _memoryHandles.size() != spans)
     throw std::invalid_argument(
-      "memPutv needs one length, remote address and memory handle per span, and one span at "
-      "least.");
+      "memPutv needs one length, remote address, remote key and memory handle per span, and one "
+      "span at least.");
   for (const auto memoryHandle : _memoryHandles)
     if (memoryHandle == nullptr)
       throw std::invalid_argument("memPutv needs a memory handle for every span.");
+  for (const auto& remoteKey : _remoteKeys)
+    if (remoteKey == nullptr) throw std::invalid_argument("memPutv needs a remote key for every span.");
 }
 
 void RequestMemPutv::flushCallback(void* request, ucs_status_t status, void* arg)
@@ -93,7 +94,6 @@ void RequestMemPutv::flushCallback(void* request, ucs_status_t status, void* arg
 void RequestMemPutv::request()
 {
   auto endpointHandle = _endpoint->getHandle();
-  auto rkey           = _remoteKey->getHandle();
   for (size_t i = 0; i < _buffers.size(); ++i) {
     ucp_request_param_t param = {
       .op_attr_mask = UCP_OP_ATTR_FIELD_MEMORY_TYPE | UCP_OP_ATTR_FIELD_MEMH,
@@ -101,7 +101,7 @@ void RequestMemPutv::request()
       .memh         = _memoryHandles[i],
     };
     void* put =
-      ucp_put_nbx(endpointHandle, _buffers[i], _lengths[i], _remoteAddrs[i], rkey, &param);
+      ucp_put_nbx(endpointHandle, _buffers[i], _lengths[i], _remoteAddrs[i], _remoteKeys[i]->getHandle(), &param);
     if (UCS_PTR_IS_ERR(put)) {
       _submitStatus = UCS_PTR_STATUS(put);
       break;
@@ -110,7 +110,7 @@ void RequestMemPutv::request()
     if (put != nullptr) ucp_request_free(put);
   }
 
-  // Flushed even when a put failed to submit: the ones already submitted read the remote key,
+  // Flushed even when a put failed to submit: the ones already submitted read their remote keys,
   // which this request holds until the flush completes.
   ucp_request_param_t param = {.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA,
                                .user_data    = this};
