@@ -1973,7 +1973,8 @@ cdef class UCXEndpoint():
         cdef vector[uint64_t] c_remote_addrs
         cdef vector[ucp_mem_h] c_memory_handles
         cdef shared_ptr[Request] req
-        cdef ucs_memory_type_t c_memory_type = <ucs_memory_type_t>MemoryType(memory_type).value
+        cdef int memory_type_value = MemoryType(memory_type).value
+        cdef ucs_memory_type_t c_memory_type = <ucs_memory_type_t>memory_type_value
 
         if not self._context_feature_flags & Feature.RMA.value:
             raise ValueError("UCXContext must be created with `Feature.RMA`")
@@ -2292,7 +2293,8 @@ cdef class UCXMemoryHandle():
     @staticmethod
     def create(UCXContext context, uintptr_t address, size_t length, memory_type):
         cdef UCXMemoryHandle memory_handle = UCXMemoryHandle.__new__(UCXMemoryHandle)
-        cdef ucs_memory_type_t c_memory_type = <ucs_memory_type_t>MemoryType(memory_type).value
+        cdef int memory_type_value = MemoryType(memory_type).value
+        cdef ucs_memory_type_t c_memory_type = <ucs_memory_type_t>memory_type_value
         with nogil:
             memory_handle._memory_handle = createMemoryHandle(
                 context._context, length, <void*>address, c_memory_type
