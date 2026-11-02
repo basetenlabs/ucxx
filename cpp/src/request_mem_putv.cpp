@@ -17,16 +17,17 @@
 
 namespace ucxx {
 
-std::shared_ptr<RequestMemPutv> createRequestMemPutv(std::shared_ptr<Endpoint> endpoint,
-                                                     std::vector<const void*> buffers,
-                                                     std::vector<size_t> lengths,
-                                                     std::vector<uint64_t> remoteAddrs,
-                                                     std::vector<std::shared_ptr<RemoteKey>> remoteKeys,
-                                                     ucs_memory_type_t memoryType,
-                                                     std::vector<ucp_mem_h> memoryHandles,
-                                                     const bool enablePythonFuture,
-                                                     RequestCallbackUserFunction callbackFunction,
-                                                     RequestCallbackUserData callbackData)
+std::shared_ptr<RequestMemPutv> createRequestMemPutv(
+  std::shared_ptr<Endpoint> endpoint,
+  std::vector<const void*> buffers,
+  std::vector<size_t> lengths,
+  std::vector<uint64_t> remoteAddrs,
+  std::vector<std::shared_ptr<RemoteKey>> remoteKeys,
+  ucs_memory_type_t memoryType,
+  std::vector<ucp_mem_h> memoryHandles,
+  const bool enablePythonFuture,
+  RequestCallbackUserFunction callbackFunction,
+  RequestCallbackUserData callbackData)
 {
   auto req = std::shared_ptr<RequestMemPutv>(new RequestMemPutv(endpoint,
                                                                 std::move(buffers),
@@ -57,12 +58,8 @@ RequestMemPutv::RequestMemPutv(std::shared_ptr<Endpoint> endpoint,
                                const bool enablePythonFuture,
                                RequestCallbackUserFunction callbackFunction,
                                RequestCallbackUserData callbackData)
-  : Request(endpoint,
-            data::RequestData{},
-            "memPutv",
-            enablePythonFuture,
-            callbackFunction,
-            callbackData),
+  : Request(
+      endpoint, data::RequestData{}, "memPutv", enablePythonFuture, callbackFunction, callbackData),
     _buffers(std::move(buffers)),
     _lengths(std::move(lengths)),
     _remoteAddrs(std::move(remoteAddrs)),
@@ -82,7 +79,8 @@ RequestMemPutv::RequestMemPutv(std::shared_ptr<Endpoint> endpoint,
     if (memoryHandle == nullptr)
       throw std::invalid_argument("memPutv needs a memory handle for every span.");
   for (const auto& remoteKey : _remoteKeys)
-    if (remoteKey == nullptr) throw std::invalid_argument("memPutv needs a remote key for every span.");
+    if (remoteKey == nullptr)
+      throw std::invalid_argument("memPutv needs a remote key for every span.");
 }
 
 void RequestMemPutv::flushCallback(void* request, ucs_status_t status, void* arg)
@@ -100,8 +98,12 @@ void RequestMemPutv::request()
       .memory_type  = _memoryType,
       .memh         = _memoryHandles[i],
     };
-    void* put =
-      ucp_put_nbx(endpointHandle, _buffers[i], _lengths[i], _remoteAddrs[i], _remoteKeys[i]->getHandle(), &param);
+    void* put = ucp_put_nbx(endpointHandle,
+                            _buffers[i],
+                            _lengths[i],
+                            _remoteAddrs[i],
+                            _remoteKeys[i]->getHandle(),
+                            &param);
     if (UCS_PTR_IS_ERR(put)) {
       _submitStatus = UCS_PTR_STATUS(put);
       break;
@@ -112,8 +114,8 @@ void RequestMemPutv::request()
 
   // Flushed even when a put failed to submit: the ones already submitted read their remote keys,
   // which this request holds until the flush completes.
-  ucp_request_param_t param = {.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA,
-                               .user_data    = this};
+  ucp_request_param_t param = {
+    .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA, .user_data = this};
   param.cb.send = flushCallback;
   void* flush   = ucp_ep_flush_nbx(endpointHandle, &param);
   if (!UCS_PTR_IS_PTR(flush) && !UCS_PTR_IS_ERR(flush) && _submitStatus != UCS_OK)

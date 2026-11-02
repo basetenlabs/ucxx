@@ -49,7 +49,8 @@ class RequestMemPutv : public Request {
 
  public:
   /**
-   * @brief Create a request putting every span `i` from `buffers[i]` to `remoteAddrs[i]` under `remoteKeys[i]`.
+   * @brief Create a request putting every span `i` from `buffers[i]` to `remoteAddrs[i]` under
+   * `remoteKeys[i]`.
    *
    * @throws std::invalid_argument if the vectors differ in length, are empty, or a memory
    *         handle or remote key is null.
