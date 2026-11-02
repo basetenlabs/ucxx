@@ -473,6 +473,11 @@ def _create_exceptions():
 #                                   Types                                     #
 ###############################################################################
 
+class MemoryType(enum.Enum):
+    HOST = UCS_MEMORY_TYPE_HOST
+    CUDA = UCS_MEMORY_TYPE_CUDA
+
+
 class Feature(enum.Enum):
     TAG = UCP_FEATURE_TAG
     RMA = UCP_FEATURE_RMA
@@ -734,6 +739,26 @@ cdef void _generic_callback(void *args) with gil:
         )
     except Exception as e:
         pass
+
+
+cdef extern from *:
+    """
+    #include <ucxx/api.h>
+    static bool ucxx_run_on_progress_thread(ucxx::Worker* worker, void (*trampoline)(void*), void* arg)
+    {
+      return worker->registerGenericPre([trampoline, arg]() { trampoline(arg); });
+    }
+    """
+    bint ucxx_run_on_progress_thread(Worker* worker, void (*trampoline)(void*) noexcept, void* arg) nogil
+
+
+cdef void _run_callable(void *arg) noexcept with gil:
+    """Run the callable a `run_on_progress_thread` call boxed, keeping what it raised."""
+    cdef list box = <list> arg
+    try:
+        box[0]()
+    except BaseException as e:
+        box[1] = e
 
 
 cdef class UCXWorker():
@@ -1191,6 +1216,18 @@ cdef class UCXWorker():
             self._worker.get().registerAmAllocator(
                 UCS_MEMORY_TYPE_HOST, wrapped_allocator
             )
+
+    def run_on_progress_thread(self, fn) -> None:
+        """Run `fn` on the progress thread before its next worker progress and return once it ran.
+
+        Called from the progress thread itself, `fn` runs at once. The GIL is
+        released while waiting. An exception `fn` raises is re-raised here.
+        """
+        cdef list box = [fn, None]
+        with nogil:
+            ucxx_run_on_progress_thread(self._worker.get(), _run_callable, <void*>box)
+        if box[1] is not None:
+            raise box[1]
 
     def stop_request_notifier_thread(self) -> None:
         with nogil:
@@ -1916,6 +1953,64 @@ cdef class UCXEndpoint():
 
         return UCXRequest(<uintptr_t><void*>&req, self._enable_python_future)
 
+    def mem_putv(
+        self,
+        buffers,
+        lengths,
+        remote_addrs,
+        remote_keys,
+        memory_type,
+        memory_handles,
+    ) -> UCXRequest:
+        """Put span `i` from `buffers[i]` to `remote_addrs[i]` on the peer; one request for all.
+
+        `remote_keys` is one `UCXRemoteKey` for every span, or a sequence with one per span.
+        The request completes once every put and the endpoint flush after them have
+        completed, so its future is set once. Every span needs its memory handle
+        (`UCXMemoryHandle.handle`): UCX is never asked to detect the memory type.
+        """
+        cdef vector[const void*] c_buffers
+        cdef vector[size_t] c_lengths
+        cdef vector[uint64_t] c_remote_addrs
+        cdef vector[shared_ptr[RemoteKey]] c_remote_keys
+        cdef UCXRemoteKey remote_key
+        cdef vector[ucp_mem_h] c_memory_handles
+        cdef shared_ptr[Request] req
+        cdef int memory_type_value = MemoryType(memory_type).value
+        cdef ucs_memory_type_t c_memory_type = <ucs_memory_type_t>memory_type_value
+
+        if not self._context_feature_flags & Feature.RMA.value:
+            raise ValueError("UCXContext must be created with `Feature.RMA`")
+
+        for buffer in buffers:
+            c_buffers.push_back(<const void*><uintptr_t>buffer)
+        for length in lengths:
+            c_lengths.push_back(length)
+        for remote_addr in remote_addrs:
+            c_remote_addrs.push_back(remote_addr)
+        if isinstance(remote_keys, UCXRemoteKey):
+            remote_keys = [remote_keys] * c_remote_addrs.size()
+        for remote_key in remote_keys:
+            c_remote_keys.push_back(remote_key._remote_key)
+        for memory_handle in memory_handles:
+            c_memory_handles.push_back(<ucp_mem_h><uintptr_t>memory_handle)
+
+        with nogil:
+            req = static_pointer_cast[Request, RequestMemPutv](
+                createRequestMemPutv(
+                    self._endpoint,
+                    move(c_buffers),
+                    move(c_lengths),
+                    move(c_remote_addrs),
+                    move(c_remote_keys),
+                    c_memory_type,
+                    move(c_memory_handles),
+                    self._enable_python_future,
+                )
+            )
+
+        return UCXRequest(<uintptr_t><void*>&req, self._enable_python_future)
+
     def am_recv(self) -> UCXRequest:
         cdef shared_ptr[Request] req
 
@@ -2186,6 +2281,73 @@ cdef void _listener_callback(ucp_conn_request_h conn_request, void *args) with g
         )
     except Exception as e:
         logger.error(f"{type(e)} when calling listener callback: {e}")
+
+
+cdef class UCXMemoryHandle():
+    """A UCP memory mapping (`ucp_mem_h`) of a buffer this process owns.
+
+    Create it with `create`; the mapping is released when the last reference goes. Both
+    call UCP, so where the context is not thread-safe, do both on the progress thread
+    (`UCXWorker.run_on_progress_thread`).
+    """
+    def __init__(self) -> None:
+        raise TypeError("UCXMemoryHandle cannot be instantiated directly; use `create`.")
+
+    def __dealloc__(self) -> None:
+        with nogil:
+            self._memory_handle.reset()
+
+    @staticmethod
+    def create(UCXContext context, uintptr_t address, size_t length, memory_type):
+        cdef UCXMemoryHandle memory_handle = UCXMemoryHandle.__new__(UCXMemoryHandle)
+        cdef int memory_type_value = MemoryType(memory_type).value
+        cdef ucs_memory_type_t c_memory_type = <ucs_memory_type_t>memory_type_value
+        with nogil:
+            memory_handle._memory_handle = createMemoryHandle(
+                context._context, length, <void*>address, c_memory_type
+            )
+        return memory_handle
+
+    @property
+    def handle(self) -> int:
+        """The `ucp_mem_h`, as `UCXEndpoint.mem_putv` takes it."""
+        return <uintptr_t>self._memory_handle.get().getHandle()
+
+    def remote_key(self) -> UCXRemoteKey:
+        """The remote key a peer needs to write into this mapping."""
+        cdef UCXRemoteKey remote_key = UCXRemoteKey.__new__(UCXRemoteKey)
+        with nogil:
+            remote_key._remote_key = createRemoteKeyFromMemoryHandle(self._memory_handle)
+        return remote_key
+
+
+cdef class UCXRemoteKey():
+    """A remote key: packed on the side that mapped the memory, unpacked on an endpoint to it."""
+    def __init__(self) -> None:
+        raise TypeError("UCXRemoteKey cannot be instantiated directly.")
+
+    def __dealloc__(self) -> None:
+        with nogil:
+            self._remote_key.reset()
+
+    @staticmethod
+    def from_serialized(UCXEndpoint endpoint, bytes data):
+        """Unpack `data`, made by `serialize` on the peer, for puts on `endpoint`.
+
+        Unpacking and the destruction on the last reference call UCP: where the context is
+        not thread-safe, do both on the progress thread (`UCXWorker.run_on_progress_thread`).
+        """
+        cdef UCXRemoteKey remote_key = UCXRemoteKey.__new__(UCXRemoteKey)
+        cdef string c_data = data
+        with nogil:
+            remote_key._remote_key = createRemoteKeyFromSerialized(endpoint._endpoint, c_data)
+        return remote_key
+
+    def serialize(self) -> bytes:
+        cdef string data
+        with nogil:
+            data = self._remote_key.get().serialize()
+        return data
 
 
 cdef class UCXListener():

@@ -158,6 +158,7 @@ add_library(
   src/request_flush.cpp
   src/request_helper.cpp
   src/request_mem.cpp
+  src/request_mem_putv.cpp
   src/request_stream.cpp
   src/request_tag.cpp
   src/request_tag_multi.cpp

@@ -98,6 +98,16 @@ cdef class UCXEndpoint:
     cdef shared_ptr[Endpoint] get_ucxx_shared_ptr(self) nogil
 
 
+cdef class UCXMemoryHandle:
+    cdef:
+        shared_ptr[MemoryHandle] _memory_handle
+
+
+cdef class UCXRemoteKey:
+    cdef:
+        shared_ptr[RemoteKey] _remote_key
+
+
 cdef class UCXListener:
     cdef:
         shared_ptr[Listener] _listener
