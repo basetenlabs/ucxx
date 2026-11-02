@@ -102,6 +102,11 @@ def test_query_endpoint_transports_rejects_a_null_handle(worker):
         worker.query_endpoint_transports(0)
 
 
+def test_close_endpoint_handle_rejects_a_null_handle(worker):
+    with pytest.raises(UCXError):
+        worker.close_endpoint_handle(0)
+
+
 def test_a_path_is_honoured(worker):
     address = worker.address
     entries = worker.query_address_devices(address)

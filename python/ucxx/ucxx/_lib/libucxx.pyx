@@ -752,6 +752,42 @@ cdef extern from *:
     bint ucxx_run_on_progress_thread(Worker* worker, void (*trampoline)(void*) noexcept, void* arg) nogil
 
 
+cdef extern from *:
+    """
+    #include <ucxx/api.h>
+    #include <ucp/api/ucp.h>
+    // Force-close a raw ucp_ep_h on `worker`, on its progress thread when one runs. Returns the close's status,
+    // or UCS_ERR_TIMED_OUT when the progress thread never ran it.
+    static ucs_status_t ucxx_close_endpoint_handle(ucxx::Worker* worker, uintptr_t handle)
+    {
+      ucs_status_t status = UCS_OK;
+      ucp_worker_h ucp_worker = worker->getHandle();
+      auto close = [ucp_worker, handle, &status]() {
+        ucp_request_param_t param{};
+        param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
+        param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
+        void* request      = ucp_ep_close_nbx(reinterpret_cast<ucp_ep_h>(handle), &param);
+        if (request == nullptr) return;
+        if (UCS_PTR_IS_ERR(request)) {
+          status = UCS_PTR_STATUS(request);
+          return;
+        }
+        // A forced close waits on nothing remote, so this loop ends on local progress alone.
+        while ((status = ucp_request_check_status(request)) == UCS_INPROGRESS)
+          ucp_worker_progress(ucp_worker);
+        ucp_request_free(request);
+      };
+      // registerGenericPre waits for the progress thread to run it, which never happens without one.
+      if (!worker->isProgressThreadRunning())
+        close();
+      else if (!worker->registerGenericPre(close))
+        return UCS_ERR_TIMED_OUT;
+      return status;
+    }
+    """
+    ucs_status_t ucxx_close_endpoint_handle(Worker* worker, uintptr_t handle) nogil
+
+
 cdef void _run_callable(void *arg) noexcept with gil:
     """Run the callable a `run_on_progress_thread` call boxed, keeping what it raised."""
     cdef list box = <list> arg
@@ -926,6 +962,23 @@ cdef class UCXWorker():
             )
             for i in range(entries.size())
         ]
+
+    def close_endpoint_handle(self, uintptr_t ucp_endpoint) -> None:
+        """Force-close a raw ``ucp_ep_h`` on this worker; return once closed.
+
+        For the endpoint a peer's wireup built, which ucxx has no
+        ``UCXEndpoint`` for: once this returns, no put from that peer lands
+        here through it. Never pass the handle of an endpoint ucxx created.
+        """
+        cdef ucs_status_t status
+        if ucp_endpoint == 0:
+            raise UCXError("Endpoint handle not initialized")
+        with nogil:
+            status = ucxx_close_endpoint_handle(self._worker.get(), ucp_endpoint)
+        if status != UCS_OK:
+            raise UCXError(
+                f"close of endpoint 0x{ucp_endpoint:x}: {ucs_status_string(status).decode()}"
+            )
 
     @property
     def enable_delayed_submission(self) -> bool:
