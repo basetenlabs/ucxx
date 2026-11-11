@@ -342,8 +342,8 @@ def register_am_receiver_callback(owner, identifier, cb_func):
     return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
 
 
-def register_am_host_allocator(cb_func):
-    return _get_ctx().register_am_host_allocator(cb_func)
+def register_am_host_allocator(cb_func, with_endpoint=False):
+    return _get_ctx().register_am_host_allocator(cb_func, with_endpoint=with_endpoint)
 
 
 def get_ucx_address_from_buffer(buffer):

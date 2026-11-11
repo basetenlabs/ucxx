@@ -19,7 +19,7 @@ async def test_an_allocator_registered_with_the_endpoint_is_given_the_receiving_
         calls.append((nbytes, ep_handle))
         return np.empty(nbytes, dtype=np.uint8)
 
-    ucxx.core._get_ctx().worker.register_am_host_allocator(allocate, with_endpoint=True)
+    ucxx.register_am_host_allocator(allocate, with_endpoint=True)
     received = asyncio.get_running_loop().create_future()
 
     async def server(ep):
