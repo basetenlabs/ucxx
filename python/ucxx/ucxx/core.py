@@ -326,12 +326,24 @@ def get_endpoint_transports(ucp_endpoint):
     return _get_ctx().query_endpoint_transports(ucp_endpoint)
 
 
+def close_endpoint_handle(ucp_endpoint):
+    """Force-close a raw ``ucp_ep_h`` if this worker still has it; return whether this call closed it.
+
+    For the endpoint a peer's wireup built, whose lanes the peer's RMA lands
+    through. UCX destroys that endpoint on its own once the peer fails, so a
+    handle the worker no longer has is reported, never dereferenced; either way,
+    once this returns no put from the peer reaches this worker's memory on it.
+    Never pass the handle of an endpoint ucxx created.
+    """
+    return _get_ctx().close_endpoint_handle(ucp_endpoint)
+
+
 def register_am_receiver_callback(owner, identifier, cb_func):
     return _get_ctx().register_am_receiver_callback(owner, identifier, cb_func)
 
 
-def register_am_host_allocator(cb_func):
-    return _get_ctx().register_am_host_allocator(cb_func)
+def register_am_host_allocator(cb_func, with_endpoint=False):
+    return _get_ctx().register_am_host_allocator(cb_func, with_endpoint=with_endpoint)
 
 
 def get_ucx_address_from_buffer(buffer):
@@ -378,6 +390,7 @@ __all__ = [
     "get_worker_devices",
     "get_address_devices",
     "get_endpoint_transports",
+    "close_endpoint_handle",
     "exclude_device",
     "get_ucx_address_from_buffer",
     "recv",

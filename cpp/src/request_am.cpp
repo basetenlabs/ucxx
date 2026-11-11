@@ -316,7 +316,7 @@ ucs_status_t RequestAm::recvCallback(void* arg,
     }
 
     try {
-      buf = amData->_allocators.at(amHeader.memoryType)(length);
+      buf = amData->_allocators.at(amHeader.memoryType)(length, ep);
     } catch (const std::exception& e) {
       ucxx_debug("Exception calling allocator: %s", e.what());
     }
@@ -379,7 +379,7 @@ ucs_status_t RequestAm::recvCallback(void* arg,
       return UCS_INPROGRESS;
     }
   } else {
-    buf = amData->_allocators.at(UCS_MEMORY_TYPE_HOST)(length);
+    buf = amData->_allocators.at(UCS_MEMORY_TYPE_HOST)(length, ep);
 
     internal::RecvAmMessage recvAmMessage(
       amData, ep, req, buf, receiverCallback, amHeader.userHeader);

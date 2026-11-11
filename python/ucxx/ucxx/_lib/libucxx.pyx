@@ -67,6 +67,16 @@ cdef extern from *:
         return [trampoline, arg](size_t size) { return trampoline(size, arg); };
     }
 
+    /* As above, for an allocator that is also given the receiving endpoint. */
+    using _ucxx_py_am_alloc_ep_t =
+        std::shared_ptr<ucxx::Buffer> (*)(size_t, ucp_ep_h, void*);
+
+    static ucxx::AmAllocatorWithEndpointType _ucxx_make_py_am_allocator_with_endpoint(
+        _ucxx_py_am_alloc_ep_t trampoline, void* arg)
+    {
+        return [trampoline, arg](size_t size, ucp_ep_h ep) { return trampoline(size, ep, arg); };
+    }
+
     /* Wrap application-owned memory in an `ExternalBuffer`. Holds a strong
      * reference to `owner` (the Python object exposing the memory) and drops
      * it from the buffer's releaser, which may run on the progress thread
@@ -110,6 +120,10 @@ cdef extern from *:
     ctypedef shared_ptr[Buffer] (*_ucxx_py_am_alloc_t)(size_t, void*)
     AmAllocatorFunction _ucxx_make_py_am_allocator(
         _ucxx_py_am_alloc_t trampoline, void* arg
+    )
+    ctypedef shared_ptr[Buffer] (*_ucxx_py_am_alloc_ep_t)(size_t, ucp_ep_h, void*)
+    AmAllocatorWithEndpointFunction _ucxx_make_py_am_allocator_with_endpoint(
+        _ucxx_py_am_alloc_ep_t trampoline, void* arg
     )
     shared_ptr[Buffer] _ucxx_make_external_buffer(
         void* ptr, size_t size, PyObject* owner
@@ -752,6 +766,41 @@ cdef extern from *:
     bint ucxx_run_on_progress_thread(Worker* worker, void (*trampoline)(void*) noexcept, void* arg) nogil
 
 
+cdef extern from *:
+    """
+    #include <ucxx/api.h>
+    #include <ucp/api/ucp.h>
+    // Force-close a raw ucp_ep_h on `worker` if the worker still has it, on its progress thread when one runs.
+    // Returns the close's status: UCS_ERR_NO_ELEM or UCS_ERR_NOT_CONNECTED where UCX destroyed or closed it
+    // already, UCS_ERR_TIMED_OUT when the progress thread never ran it.
+    static ucs_status_t ucxx_close_endpoint_handle(ucxx::Worker* worker, uintptr_t handle)
+    {
+      ucs_status_t status = UCS_OK;
+      ucp_worker_h ucp_worker = worker->getHandle();
+      auto close = [ucp_worker, handle, &status]() {
+        ucp_request_param_t param{};
+        void* request = ucp_worker_ep_close_if_alive_nbx(ucp_worker, reinterpret_cast<ucp_ep_h>(handle), &param);
+        if (request == nullptr) return;
+        if (UCS_PTR_IS_ERR(request)) {
+          status = UCS_PTR_STATUS(request);
+          return;
+        }
+        // A forced close waits on nothing remote, so this loop ends on local progress alone.
+        while ((status = ucp_request_check_status(request)) == UCS_INPROGRESS)
+          ucp_worker_progress(ucp_worker);
+        ucp_request_free(request);
+      };
+      // registerGenericPre waits for the progress thread to run it, which never happens without one.
+      if (!worker->isProgressThreadRunning())
+        close();
+      else if (!worker->registerGenericPre(close))
+        return UCS_ERR_TIMED_OUT;
+      return status;
+    }
+    """
+    ucs_status_t ucxx_close_endpoint_handle(Worker* worker, uintptr_t handle) nogil
+
+
 cdef void _run_callable(void *arg) noexcept with gil:
     """Run the callable a `run_on_progress_thread` call boxed, keeping what it raised."""
     cdef list box = <list> arg
@@ -926,6 +975,28 @@ cdef class UCXWorker():
             )
             for i in range(entries.size())
         ]
+
+    def close_endpoint_handle(self, uintptr_t ucp_endpoint) -> bool:
+        """Force-close a raw ``ucp_ep_h`` on this worker if it still has it; return whether this call closed it.
+
+        For the endpoint a peer's wireup built, which ucxx has no
+        ``UCXEndpoint`` for, and which UCX destroys on its own once the peer
+        fails: a handle the worker no longer has is never dereferenced. Either
+        way, once this returns no put from that peer lands here through it.
+        Never pass the handle of an endpoint ucxx created.
+        """
+        cdef ucs_status_t status
+        if ucp_endpoint == 0:
+            raise UCXError("Endpoint handle not initialized")
+        with nogil:
+            status = ucxx_close_endpoint_handle(self._worker.get(), ucp_endpoint)
+        if status == UCS_ERR_NO_ELEM or status == UCS_ERR_NOT_CONNECTED:
+            return False
+        if status != UCS_OK:
+            raise UCXError(
+                f"close of endpoint 0x{ucp_endpoint:x}: {ucs_status_string(status).decode()}"
+            )
+        return True
 
     @property
     def enable_delayed_submission(self) -> bool:
@@ -1171,7 +1242,7 @@ cdef class UCXWorker():
         finally:
             del cb_info
 
-    def register_am_host_allocator(self, cb_func) -> None:
+    def register_am_host_allocator(self, cb_func, with_endpoint: bool = False) -> None:
         """Register a Python allocator for host-memory active message receives.
 
         Once registered, every eager host-memory active message received on
@@ -1197,6 +1268,10 @@ cdef class UCXWorker():
             **Executes on the UCXX progress thread** with the GIL acquired:
             it must be quick and non-blocking; blocking stalls all UCX
             progress for the worker.
+        with_endpoint: bool
+            Call `cb_func(size, ep_handle)` instead, with the raw `ucp_ep_h`
+            the message arrives on, so a buffer lent to a rendezvous receive
+            can be traced to its peer before the receive completes.
         """
         if not self._context_feature_flags & Feature.AM.value:
             raise ValueError("UCXContext must be created with `Feature.AM`")
@@ -1206,16 +1281,26 @@ cdef class UCXWorker():
         cdef dict cb_data = {"cb_func": cb_func}
         self._am_host_allocator_data = cb_data
 
-        cdef AmAllocatorFunction wrapped_allocator = (
-            _ucxx_make_py_am_allocator(
+        cdef AmAllocatorFunction wrapped_allocator
+        cdef AmAllocatorWithEndpointFunction wrapped_allocator_with_endpoint
+        if with_endpoint:
+            wrapped_allocator_with_endpoint = _ucxx_make_py_am_allocator_with_endpoint(
+                <_ucxx_py_am_alloc_ep_t>&_am_host_allocator_with_endpoint,
+                <void*>cb_data,
+            )
+            with nogil:
+                self._worker.get().registerAmAllocatorWithEndpoint(
+                    UCS_MEMORY_TYPE_HOST, wrapped_allocator_with_endpoint
+                )
+        else:
+            wrapped_allocator = _ucxx_make_py_am_allocator(
                 <_ucxx_py_am_alloc_t>&_am_host_allocator,
                 <void*>cb_data,
             )
-        )
-        with nogil:
-            self._worker.get().registerAmAllocator(
-                UCS_MEMORY_TYPE_HOST, wrapped_allocator
-            )
+            with nogil:
+                self._worker.get().registerAmAllocator(
+                    UCS_MEMORY_TYPE_HOST, wrapped_allocator
+                )
 
     def run_on_progress_thread(self, fn) -> None:
         """Run `fn` on the progress thread before its next worker progress and return once it ran.
@@ -1591,7 +1676,7 @@ cdef void _am_receiver_callback(
         logger.error(f"{type(e)} when calling AM receiver callback: {e}")
 
 
-cdef shared_ptr[Buffer] _am_host_allocator(size_t size, void* args) with gil:
+cdef shared_ptr[Buffer] _am_host_allocate(size_t size, ucp_ep_h ep, void* args) with gil:
     """Trampoline for the AM host allocator registered from Python.
 
     Runs on the UCXX progress thread with the GIL acquired; the Python
@@ -1605,7 +1690,7 @@ cdef shared_ptr[Buffer] _am_host_allocator(size_t size, void* args) with gil:
     cdef Array arr
 
     try:
-        obj = cb_data["cb_func"](size)
+        obj = cb_data["cb_func"](size) if ep == NULL else cb_data["cb_func"](size, int(<uintptr_t>ep))
         if obj is not None:
             arr = Array(obj)
             if arr.cuda or arr.readonly or not arr._contiguous():
@@ -1625,6 +1710,18 @@ cdef shared_ptr[Buffer] _am_host_allocator(size_t size, void* args) with gil:
         logger.error(f"{type(e)} when calling AM host allocator: {e}")
 
     return _ucxx_make_default_host_buffer(size)
+
+
+cdef shared_ptr[Buffer] _am_host_allocator(size_t size, void* args) with gil:
+    """Trampoline for the AM host allocator registered without the endpoint."""
+    return _am_host_allocate(size, NULL, args)
+
+
+cdef shared_ptr[Buffer] _am_host_allocator_with_endpoint(
+    size_t size, ucp_ep_h ep, void* args
+) with gil:
+    """Trampoline for the AM host allocator registered with the endpoint."""
+    return _am_host_allocate(size, ep, args)
 
 
 cdef void _endpoint_close_callback(ucs_status_t status, shared_ptr[void] args) with gil:
