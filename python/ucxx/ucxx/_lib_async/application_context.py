@@ -232,11 +232,11 @@ class ApplicationContext:
         return self.worker.query_endpoint_transports(ucp_endpoint)
 
     def close_endpoint_handle(self, ucp_endpoint):
-        """Force-close a raw ``ucp_ep_h`` on this worker, the endpoint a peer's wireup built.
+        """Force-close a raw ``ucp_ep_h`` on this worker if it still has it; return whether this call closed it.
 
-        Once this returns, no put from that peer lands here through it.
+        Either way, once this returns no put from that peer lands here through it.
         """
-        self.worker.close_endpoint_handle(ucp_endpoint)
+        return self.worker.close_endpoint_handle(ucp_endpoint)
 
     def worker_address_with_devices(self, device_names):
         """Worker address listing only ``device_names``.

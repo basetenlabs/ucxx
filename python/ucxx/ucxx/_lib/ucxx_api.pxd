@@ -79,6 +79,8 @@ cdef extern from "ucp/api/ucp.h" nogil:
 
     # Constants
     ucs_status_t UCS_OK
+    ucs_status_t UCS_ERR_NO_ELEM
+    ucs_status_t UCS_ERR_NOT_CONNECTED
 
     ucs_memory_type_t UCS_MEMORY_TYPE_HOST
     ucs_memory_type_t UCS_MEMORY_TYPE_CUDA

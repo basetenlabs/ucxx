@@ -756,17 +756,16 @@ cdef extern from *:
     """
     #include <ucxx/api.h>
     #include <ucp/api/ucp.h>
-    // Force-close a raw ucp_ep_h on `worker`, on its progress thread when one runs. Returns the close's status,
-    // or UCS_ERR_TIMED_OUT when the progress thread never ran it.
+    // Force-close a raw ucp_ep_h on `worker` if the worker still has it, on its progress thread when one runs.
+    // Returns the close's status: UCS_ERR_NO_ELEM or UCS_ERR_NOT_CONNECTED where UCX destroyed or closed it
+    // already, UCS_ERR_TIMED_OUT when the progress thread never ran it.
     static ucs_status_t ucxx_close_endpoint_handle(ucxx::Worker* worker, uintptr_t handle)
     {
       ucs_status_t status = UCS_OK;
       ucp_worker_h ucp_worker = worker->getHandle();
       auto close = [ucp_worker, handle, &status]() {
         ucp_request_param_t param{};
-        param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
-        param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
-        void* request      = ucp_ep_close_nbx(reinterpret_cast<ucp_ep_h>(handle), &param);
+        void* request = ucp_worker_ep_close_if_alive_nbx(ucp_worker, reinterpret_cast<ucp_ep_h>(handle), &param);
         if (request == nullptr) return;
         if (UCS_PTR_IS_ERR(request)) {
           status = UCS_PTR_STATUS(request);
@@ -963,22 +962,27 @@ cdef class UCXWorker():
             for i in range(entries.size())
         ]
 
-    def close_endpoint_handle(self, uintptr_t ucp_endpoint) -> None:
-        """Force-close a raw ``ucp_ep_h`` on this worker; return once closed.
+    def close_endpoint_handle(self, uintptr_t ucp_endpoint) -> bool:
+        """Force-close a raw ``ucp_ep_h`` on this worker if it still has it; return whether this call closed it.
 
         For the endpoint a peer's wireup built, which ucxx has no
-        ``UCXEndpoint`` for: once this returns, no put from that peer lands
-        here through it. Never pass the handle of an endpoint ucxx created.
+        ``UCXEndpoint`` for, and which UCX destroys on its own once the peer
+        fails: a handle the worker no longer has is never dereferenced. Either
+        way, once this returns no put from that peer lands here through it.
+        Never pass the handle of an endpoint ucxx created.
         """
         cdef ucs_status_t status
         if ucp_endpoint == 0:
             raise UCXError("Endpoint handle not initialized")
         with nogil:
             status = ucxx_close_endpoint_handle(self._worker.get(), ucp_endpoint)
+        if status == UCS_ERR_NO_ELEM or status == UCS_ERR_NOT_CONNECTED:
+            return False
         if status != UCS_OK:
             raise UCXError(
                 f"close of endpoint 0x{ucp_endpoint:x}: {ucs_status_string(status).decode()}"
             )
+        return True
 
     @property
     def enable_delayed_submission(self) -> bool:

@@ -327,13 +327,15 @@ def get_endpoint_transports(ucp_endpoint):
 
 
 def close_endpoint_handle(ucp_endpoint):
-    """Force-close a raw ``ucp_ep_h`` on this worker, the endpoint a peer's wireup built.
+    """Force-close a raw ``ucp_ep_h`` if this worker still has it; return whether this call closed it.
 
-    That endpoint's lanes are the ones the peer's RMA lands through, so once this
-    returns no put from the peer reaches this worker's memory on them; the peer
-    learns only by its own timeout. Never pass the handle of an endpoint ucxx created.
+    For the endpoint a peer's wireup built, whose lanes the peer's RMA lands
+    through. UCX destroys that endpoint on its own once the peer fails, so a
+    handle the worker no longer has is reported, never dereferenced; either way,
+    once this returns no put from the peer reaches this worker's memory on it.
+    Never pass the handle of an endpoint ucxx created.
     """
-    _get_ctx().close_endpoint_handle(ucp_endpoint)
+    return _get_ctx().close_endpoint_handle(ucp_endpoint)
 
 
 def register_am_receiver_callback(owner, identifier, cb_func):
