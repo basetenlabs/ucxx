@@ -232,7 +232,9 @@ class ApplicationContext:
         return self.worker.query_endpoint_transports(ucp_endpoint)
 
     def close_endpoint_handle(self, ucp_endpoint):
-        """Force-close a raw ``ucp_ep_h`` on this worker if it still has it; return whether this call closed it.
+        """Force-close a raw ``ucp_ep_h`` on this worker if it still has it.
+
+        Return whether this call closed it.
 
         Either way, once this returns no put from that peer lands here through it.
         """

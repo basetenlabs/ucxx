@@ -327,7 +327,9 @@ def get_endpoint_transports(ucp_endpoint):
 
 
 def close_endpoint_handle(ucp_endpoint):
-    """Force-close a raw ``ucp_ep_h`` if this worker still has it; return whether this call closed it.
+    """Force-close a raw ``ucp_ep_h`` if this worker still has it.
+
+    Return whether this call closed it.
 
     For the endpoint a peer's wireup built, whose lanes the peer's RMA lands
     through. UCX destroys that endpoint on its own once the peer fails, so a

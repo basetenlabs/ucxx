@@ -12,7 +12,9 @@ from ucxx._lib_async.utils_test import wait_listener_client_handlers
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [64, 8 * 1024 * 1024])
-async def test_an_allocator_registered_with_the_endpoint_is_given_the_receiving_one(size):
+async def test_an_allocator_registered_with_the_endpoint_is_given_the_receiving_one(
+    size,
+):
     calls = []
 
     def allocate(nbytes, ep_handle):
