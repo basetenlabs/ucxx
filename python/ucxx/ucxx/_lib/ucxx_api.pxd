@@ -79,6 +79,8 @@ cdef extern from "ucp/api/ucp.h" nogil:
 
     # Constants
     ucs_status_t UCS_OK
+    ucs_status_t UCS_ERR_NO_ELEM
+    ucs_status_t UCS_ERR_NOT_CONNECTED
 
     ucs_memory_type_t UCS_MEMORY_TYPE_HOST
     ucs_memory_type_t UCS_MEMORY_TYPE_CUDA
@@ -222,6 +224,10 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
     cdef cppclass AmAllocatorFunction "ucxx::AmAllocatorType":
         pass
 
+    # `ucxx::AmAllocatorWithEndpointType`, opaque for the same reason.
+    cdef cppclass AmAllocatorWithEndpointFunction "ucxx::AmAllocatorWithEndpointType":
+        pass
+
     ctypedef cpp_unordered_map[string, string] ConfigMap
 
     cdef cppclass ContextBuilder "ucxx::experimental::ContextBuilder":
@@ -360,6 +366,9 @@ cdef extern from "<ucxx/api.h>" namespace "ucxx" nogil:
         )
         void registerAmAllocator(
             ucs_memory_type_t memoryType, AmAllocatorFunction allocator
+        ) except +raise_py_error
+        void registerAmAllocatorWithEndpoint(
+            ucs_memory_type_t memoryType, AmAllocatorWithEndpointFunction allocator
         ) except +raise_py_error
         void registerAmReceiverCallback(
             AmReceiverCallbackInfo info, AmReceiverCallbackType callback

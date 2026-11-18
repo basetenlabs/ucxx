@@ -129,6 +129,14 @@ typedef RequestCallbackUserData EndpointCloseCallbackUserData;
 typedef std::function<std::shared_ptr<Buffer>(size_t)> AmAllocatorType;
 
 /**
+ * @brief Custom Active Message allocator that is also given the receiving endpoint.
+ *
+ * As `AmAllocatorType`, plus the `ucp_ep_h` the message arrives on (its reply endpoint), so
+ * the application knows which peer a buffer is lent to before the receive completes.
+ */
+typedef std::function<std::shared_ptr<Buffer>(size_t, ucp_ep_h)> AmAllocatorWithEndpointType;
+
+/**
  * @brief Active Message receiver callback.
  *
  * Type for a custom Active Message receiver callback, executed by the remote worker upon

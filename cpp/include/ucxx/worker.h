@@ -1159,6 +1159,19 @@ class Worker : public Component {
   void registerAmAllocator(ucs_memory_type_t memoryType, AmAllocatorType allocator);
 
   /**
+   * @brief Register an allocator for active messages that is also given the receiving endpoint.
+   *
+   * As `registerAmAllocator`, but the allocator is called with the `ucp_ep_h` the message
+   * arrives on as well as its length, so a buffer can be traced to its peer while a
+   * rendezvous receive into it is still in progress. Replaces any allocator for `memoryType`.
+   *
+   * @param[in] memoryType  the memory type the allocator will be used for.
+   * @param[in] allocator   the allocator callable, called as `allocator(length, ep)`.
+   */
+  void registerAmAllocatorWithEndpoint(ucs_memory_type_t memoryType,
+                                       AmAllocatorWithEndpointType allocator);
+
+  /**
    * @brief Register receiver callback for active messages.
    *
    * Register a new receiver callback for active messages. By default, active messages do

@@ -918,6 +918,15 @@ void Worker::registerAmAllocator(ucs_memory_type_t memoryType, AmAllocatorType a
 {
   if (_amData == nullptr)
     throw std::runtime_error("Active Messages was not enabled during context creation");
+  _amData->_allocators.insert_or_assign(
+    memoryType, [allocator](size_t length, ucp_ep_h) { return allocator(length); });
+}
+
+void Worker::registerAmAllocatorWithEndpoint(ucs_memory_type_t memoryType,
+                                             AmAllocatorWithEndpointType allocator)
+{
+  if (_amData == nullptr)
+    throw std::runtime_error("Active Messages was not enabled during context creation");
   _amData->_allocators.insert_or_assign(memoryType, allocator);
 }
 

@@ -113,7 +113,7 @@ class AmData {
   std::mutex _mutex{};     ///< Mutex to provide access to pools/maps
   std::function<void(std::shared_ptr<Request>)>
     _registerInflightRequest{};  ///< Worker function to register inflight requests with
-  std::unordered_map<ucs_memory_type_t, AmAllocatorType>
+  std::unordered_map<ucs_memory_type_t, AmAllocatorWithEndpointType>
     _allocators{};  ///< Default and user-defined active message allocators
 };
 
