@@ -87,6 +87,7 @@ class Worker : public Component {
     nullptr};  ///< The argument to be passed to the progress thread start callback
   std::shared_ptr<DelayedSubmissionCollection> _delayedSubmissionCollection{
     nullptr};  ///< Collection of enqueued delayed submissions
+  bool _wakeupEnabled{true};  ///< Whether the context has UCP_FEATURE_WAKEUP, so the worker can be signaled
 
   friend std::shared_ptr<RequestAm> createRequestAm(
     std::shared_ptr<Endpoint> endpoint,

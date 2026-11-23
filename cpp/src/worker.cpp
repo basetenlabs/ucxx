@@ -52,6 +52,7 @@ Worker::Worker(std::shared_ptr<Context> context,
 
   _delayedSubmissionCollection =
     std::make_shared<DelayedSubmissionCollection>(enableDelayedSubmission);
+  _wakeupEnabled = (context->getFeatureFlags() & UCP_FEATURE_WAKEUP) != 0;
 
   if (context->getFeatureFlags() & UCP_FEATURE_AM) {
     unsigned int AM_MSG_ID            = 0;
@@ -341,9 +342,14 @@ void Worker::registerDelayedSubmission(std::shared_ptr<Request> request,
 
     /* Waking the progress event is needed here because the UCX request is
      * not dispatched immediately. Thus we must signal the progress task so
-     * it will ensure the request is dispatched.
+     * it will ensure the request is dispatched. A polling progress thread
+     * drains the collection on its next iteration and needs no wakeup, and a
+     * context created without UCP_FEATURE_WAKEUP (EFA srd has no completion
+     * event fd) cannot be signaled at all: ucp_worker_signal fails, and
+     * disabling delayed submission to avoid that lets the calling thread
+     * submit to the worker concurrently with the progress thread.
      */
-    signal();
+    if (!_progressThreadPollingMode.load(std::memory_order_acquire) && _wakeupEnabled) signal();
   } else {
     callback();
   }
